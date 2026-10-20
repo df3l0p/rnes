@@ -393,7 +393,7 @@ func run() error {
 		}
 	}
 
-	modelIDs, err := llamaserver.DiscoverModels(baseURL)
+	modelIDs, err := llamaserver.DiscoverModels(baseURL, false)
 	if err != nil {
 		return fmt.Errorf("discovering models: %w", err)
 	}
@@ -404,9 +404,9 @@ func run() error {
 		if err := llamaserver.Download(cfg.model, os.Stderr); err != nil {
 			return err
 		}
-		modelIDs, err = llamaserver.DiscoverModels(baseURL)
+		modelIDs, err = llamaserver.DiscoverModels(baseURL, true)
 		if err != nil {
-			return fmt.Errorf("discovering models: %w", err)
+			return fmt.Errorf("refreshing models after download: %w", err)
 		}
 		model, ok = llamaserver.ResolveModel(modelIDs, cfg.model)
 		if !ok {

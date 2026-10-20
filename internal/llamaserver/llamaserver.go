@@ -173,17 +173,23 @@ type modelsResponse struct {
 // cached model (loaded or not); a server started with a single -hf model
 // reports just that one. The list may be empty, e.g. a router with an empty
 // cache.
-func DiscoverModels(baseURL string) ([]string, error) {
+// With reload, the router refreshes its catalog first, so a model downloaded
+// since the server started becomes visible.
+func DiscoverModels(baseURL string, reload bool) ([]string, error) {
+	endpoint := baseURL + "/v1/models"
+	if reload {
+		endpoint += "?reload=1"
+	}
 	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(baseURL + "/v1/models")
+	resp, err := client.Get(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("querying %s/v1/models: %w", baseURL, err)
+		return nil, fmt.Errorf("querying %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%s/v1/models returned %s: %s", baseURL, resp.Status, body)
+		return nil, fmt.Errorf("%s returned %s: %s", endpoint, resp.Status, body)
 	}
 
 	var parsed modelsResponse

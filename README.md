@@ -12,7 +12,8 @@ Concretely, running `rnes` in a project:
    them on demand.
 2. Discovers the served models and merges an OpenAI-compatible provider
    entry listing all of them into the agent's config. If `-model` isn't
-   among them, it's downloaded first (`llama download`, unified CLI only).
+   among them, it's downloaded first (`llama download`, unified CLI only),
+   then the server's model catalog is refreshed.
 3. Runs the agent in the current directory with `-model` selected.
 4. On exit, stops the `llama-server` it started — unless another `rnes`
    process is still using it, in which case it's left running.
