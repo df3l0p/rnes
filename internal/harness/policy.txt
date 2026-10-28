@@ -15,10 +15,10 @@ api.github.com:443
 # the model catalog opencode fetches at startup
 models.dev:443
 
-# Common package registries (uncomment as needed):
-# proxy.golang.org:443
-# sum.golang.org:443
-# pypi.org:443
-# files.pythonhosted.org:443
-# crates.io:443
-# static.crates.io:443
+# Common package registries
+proxy.golang.org:443
+sum.golang.org:443
+pypi.org:443
+files.pythonhosted.org:443
+crates.io:443
+static.crates.io:443

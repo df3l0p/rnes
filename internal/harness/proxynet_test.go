@@ -185,6 +185,9 @@ func TestDefaultPolicyParses(t *testing.T) {
 	for _, want := range []string{
 		"registry.npmjs.org:443", "github.com:443", "models.dev:443",
 		"api.github.com:443",
+		"proxy.golang.org:443", "sum.golang.org:443",
+		"pypi.org:443", "files.pythonhosted.org:443",
+		"crates.io:443", "static.crates.io:443",
 	} {
 		if !pol.Allows(want) {
 			t.Errorf("default policy doesn't allow %s", want)

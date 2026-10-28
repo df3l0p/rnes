@@ -152,10 +152,12 @@ Only `docker` is needed on the host (not opencode).
   each session gets its own proxy container on a private network between the
   two, and all of the sandbox's HTTP(S) traffic is forced through it via
   `HTTP_PROXY`/`HTTPS_PROXY`. By default, the proxy only allows the session's
-  model server plus `registry.npmjs.org`, `github.com`, `api.github.com` and
-  `models.dev` (all over https) and blocks everything else, including non-HTTP
-  protocols such as git over ssh. Those built-in defaults live in
-  `internal/harness/policy.txt` (one `host:port` per line).
+  model server plus `registry.npmjs.org`, `proxy.golang.org`, `sum.golang.org`,
+  `pypi.org`, `files.pythonhosted.org`, `crates.io`, `static.crates.io`,
+  `github.com`, `api.github.com` and `models.dev` (all over https) and blocks
+  everything else, including non-HTTP protocols such as git over ssh. Those
+  built-in defaults live in `internal/harness/policy.txt` (one `host:port` per
+  line).
   - *Per-project policy (`.rnes/policy.txt`):* run `rnes -generate-policy` in a
     project to write a starter `.rnes/policy.txt` (it refuses to overwrite an
     existing file). When `.rnes/policy.txt` is present, `-sandbox` uses it
