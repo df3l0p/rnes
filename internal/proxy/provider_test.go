@@ -218,7 +218,7 @@ func newInjectingProxy(t *testing.T, upstreamHandler http.Handler, mk func(hostp
 		t.Fatal(err)
 	}
 	srv := &Server{
-		Policy:      NewPolicy([]string{hostport}),
+		Policy:      NewPrivatePolicy([]string{hostport}),
 		CA:          ca,
 		Logf:        (&auditLog{}).Logf,
 		UpstreamTLS: &tls.Config{RootCAs: trust},

@@ -51,6 +51,7 @@ type proxyNet struct {
 	// error (nil for a clean exit) once it has ended.
 	attach     *exec.Cmd
 	attachDone chan error
+	stopped    bool
 }
 
 // proxyCAMount is where the proxy container mounts caVolume. It must be the
@@ -115,6 +116,8 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 		"run", "-d", "--pull=never",
 		"--name", p.container,
 		"--label", label,
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
 		"--add-host", containerHost + ":" + hostIP,
 		"-v", policyPath + ":/etc/rnes-proxy/policy.txt:ro",
 	}
@@ -162,9 +165,7 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 		p.stop()
 		return nil, err
 	}
-	if inspect {
-		p.followLogs(id)
-	}
+	p.followLogs(id)
 	return p, nil
 }
 
@@ -223,14 +224,20 @@ func (p *proxyNet) waitReady() error {
 	}
 }
 
-// writePolicyFile writes policy to a private temp file, returning its path.
-// The caller owns cleanup.
+// writePolicyFile writes policy to a temp file readable inside the proxy
+// container (0644, since --cap-drop=ALL drops CAP_DAC_READ_SEARCH and the file
+// holds only host:port entries, never secrets), returning its path. The caller
+// owns cleanup.
 func writePolicyFile(policy []byte) (string, error) {
 	f, err := os.CreateTemp("", "rnes-proxy-policy-*.txt")
 	if err != nil {
 		return "", fmt.Errorf("creating proxy policy file: %w", err)
 	}
 	defer f.Close()
+	if err := f.Chmod(0o644); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("setting proxy policy file mode: %w", err)
+	}
 	if _, err := f.Write(policy); err != nil {
 		os.Remove(f.Name())
 		return "", fmt.Errorf("writing proxy policy file: %w", err)
@@ -250,6 +257,10 @@ func (p *proxyNet) proxyURL() string {
 // ends with the container; it's killed if it doesn't. The log file is kept.
 // Safe to call on a partially-started proxyNet, and more than once.
 func (p *proxyNet) stop() {
+	if p.stopped {
+		return
+	}
+	p.stopped = true
 	if p.policyFile != "" {
 		os.Remove(p.policyFile)
 	}

@@ -6,8 +6,8 @@ package proxy
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,19 +38,56 @@ const defaultHalfCloseIdle = 30 * time.Second
 // case-insensitively since host names are.
 type Policy struct {
 	Allow map[string]bool
+	// Private names the subset of Allow entries that may connect to a
+	// non-public address (such as the host's llama-server). Every other
+	// destination — whether in Allow or matched by AnyPublic — must resolve
+	// to a public IP (see isPublic).
+	Private map[string]bool
 	// AnyPublic also lets through any destination not in Allow, as long as
 	// the address actually dialed is public (see isPublic): the internet,
 	// but not the host machine or the LAN.
 	AnyPublic bool
 }
 
-// NewPolicy builds a Policy allowing exactly the given "host:port" entries.
+// NewPolicy builds a Policy allowing the given "host:port" entries at public
+// addresses.
 func NewPolicy(hostports []string) Policy {
 	m := make(map[string]bool, len(hostports))
 	for _, h := range hostports {
 		m[strings.ToLower(h)] = true
 	}
 	return Policy{Allow: m}
+}
+
+// NewPrivatePolicy builds a Policy allowing the given "host:port" entries even
+// when they resolve to non-public addresses (e.g. loopback in tests or the
+// host's llama-server).
+func NewPrivatePolicy(hostports []string) Policy {
+	pol := NewPolicy(hostports)
+	pol.AllowPrivate(hostports...)
+	return pol
+}
+
+// AllowPrivate marks each hostport (and adds it to Allow) as permitted to
+// dial non-public addresses.
+func (p *Policy) AllowPrivate(hostports ...string) {
+	if p.Allow == nil {
+		p.Allow = make(map[string]bool, len(hostports))
+	}
+	if p.Private == nil {
+		p.Private = make(map[string]bool, len(hostports))
+	}
+	for _, h := range hostports {
+		k := strings.ToLower(h)
+		p.Allow[k] = true
+		p.Private[k] = true
+	}
+}
+
+// AllowsPrivate reports whether hostport is permitted to connect to a
+// non-public address.
+func (p Policy) AllowsPrivate(hostport string) bool {
+	return p.Private[strings.ToLower(hostport)]
 }
 
 // Explicit reports whether hostport is listed, as opposed to allowed only by
@@ -79,7 +116,7 @@ type Server struct {
 	// request; a non-nil error refuses it with a 403. It is where credential
 	// injection or request rules would plug in.
 	OnRequest func(r *http.Request, target string) error
-	// Logf receives an audit line per intercepted request. Nil means the
+	// Logf receives an audit line per proxied or denied request. Nil means the
 	// standard logger.
 	Logf func(format string, args ...any)
 	// UpstreamTLS configures how intercepted requests verify the real server;
@@ -115,7 +152,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	target := r.Host
 	if !s.Policy.Allows(target) {
-		denied(w, target)
+		s.denied(w, target)
 		return
 	}
 	if s.interceptable(target) {
@@ -124,10 +161,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	upstream, err := s.dialerFor(target).DialContext(r.Context(), "tcp", target)
 	if err != nil {
-		dialFailed(w, target, err)
+		s.dialFailed(w, target, err)
 		return
 	}
 	defer upstream.Close()
+	s.logf("rnes-proxy: CONNECT %s -> tunnelled", target)
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -213,8 +251,8 @@ func closeWrite(c net.Conn) {
 }
 
 // denied logs and refuses a destination the policy doesn't allow.
-func denied(w http.ResponseWriter, target string) {
-	log.Printf("rnes-proxy: denied %s", target)
+func (s *Server) denied(w http.ResponseWriter, target string) {
+	s.logf("rnes-proxy: denied %s", target)
 	http.Error(w, "rnes-proxy: host not allowed: "+target, http.StatusForbidden)
 }
 
@@ -258,20 +296,25 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 	target := hostport(r.URL)
 	if !s.Policy.Allows(target) {
-		denied(w, target)
+		s.denied(w, target)
 		return
 	}
+	start := time.Now()
 	out := r.Clone(r.Context())
 	out.RequestURI = "" // must be empty on a client request
 	removeHopByHop(out.Header)
 
 	resp, err := s.transportFor(target).RoundTrip(out)
 	if err != nil {
-		dialFailed(w, target, err)
+		s.dialFailed(w, target, err)
+		if !errors.Is(err, errNotPublic) {
+			s.logf("rnes-proxy: %s http://%s%s -> %d (%s): %s", r.Method, target, r.URL.EscapedPath(), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err.Error())
+		}
 		return
 	}
 	defer resp.Body.Close()
 	relay(w, resp)
+	s.logf("rnes-proxy: %s http://%s%s -> %d (%s)", r.Method, target, r.URL.EscapedPath(), resp.StatusCode, time.Since(start).Round(time.Millisecond))
 }
 
 // relay writes resp to w, flushing chunk by chunk so streamed responses

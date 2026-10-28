@@ -85,7 +85,7 @@ func (s *Server) handleIntercept(w http.ResponseWriter, r *http.Request, target 
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		// A client that doesn't trust the session CA (a pinned certificate, a
 		// tool with its own trust store) ends up here.
-		log.Printf("rnes-proxy: TLS handshake for %s failed: %v", target, err)
+		s.logf("rnes-proxy: TLS handshake for %s failed: %v", target, err)
 		return
 	}
 
@@ -155,6 +155,10 @@ func (s *Server) serveIntercepted(w http.ResponseWriter, r *http.Request, target
 
 	resp, err := s.upstream(target).RoundTrip(out)
 	if err != nil {
+		if errors.Is(err, errNotPublic) {
+			s.denied(w, target+" (not a public address)")
+			return http.StatusForbidden, nil
+		}
 		http.Error(w, "rnes-proxy: upstream "+target+": "+err.Error(), http.StatusBadGateway)
 		return http.StatusBadGateway, err
 	}

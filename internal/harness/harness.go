@@ -82,6 +82,11 @@ type Options struct {
 	// Skills are host skills to mount read-only into the sandbox, where
 	// opencode looks for global skills (with Sandbox; see package skills).
 	Skills []skills.Skill
+	// Policy, when non-nil (with Sandbox), replaces the built-in default
+	// egress allow-list (e.g. from .rnes/policy.txt). An empty non-nil slice
+	// allows nothing besides this session's llama-server (plus openrouter.ai
+	// when OpenRouterKey is set, or any public host with AllNet).
+	Policy []byte
 }
 
 // registry maps a harness name, as accepted by rnes's --harness flag, to a

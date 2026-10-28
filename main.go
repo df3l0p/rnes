@@ -38,6 +38,9 @@ type cliConfig struct {
 	// sandboxUpdate rebuilds the sandbox images and exits without running the
 	// agent. applyImplications turns it into sandbox and build.
 	sandboxUpdate bool
+	// generatePolicy writes a starter .rnes/policy.txt in the current
+	// directory and exits without running the agent.
+	generatePolicy bool
 	// allNet lets the sandbox reach any public host, not just the
 	// default allow-list.
 	allNet bool
@@ -68,6 +71,9 @@ const defaultHost = "127.0.0.1"
 
 // validate rejects flag combinations that only make sense with -sandbox.
 func (c cliConfig) validate() error {
+	if c.generatePolicy && c.sandboxUpdate {
+		return fmt.Errorf("-generate-policy and -sandbox-update cannot be used together")
+	}
 	if !c.sandbox && (c.image != "" || c.build || c.allNet || c.noInspect || len(c.skills) > 0 || len(c.skillsDirs) > 0) {
 		return fmt.Errorf("-image, -build, -all-net, -no-inspect, -skill and -skills-dir require -sandbox")
 	}
@@ -145,6 +151,8 @@ func tokenWarning(token string) string {
 func (c cliConfig) sessionCredential(env, val string) string {
 	switch {
 	case val == "":
+	case c.generatePolicy:
+		fmt.Fprintf(os.Stderr, "rnes: note: %s is ignored with -generate-policy (no session runs)\n", env)
 	case !c.sandbox:
 		fmt.Fprintf(os.Stderr, "rnes: note: %s is ignored without -sandbox\n", env)
 	case c.sandboxUpdate:
@@ -182,6 +190,43 @@ func resolveSkills(c cliConfig, home, cwd string, stderr io.Writer) ([]skills.Sk
 		fmt.Fprintln(stderr, "rnes: note: -skills-dir only adds folders to look -skill names up in; without -skill nothing is attached")
 	}
 	return attached, nil
+}
+
+// resolvePolicy prepares <cwd>/.rnes and loads <cwd>/.rnes/policy.txt for a
+// sandbox session, or notes that the file is ignored when running on the host.
+// If a custom policy omits GitHub's hosts, RNES_GITHUB_TOKEN is dropped with a
+// warning so the policy stays authoritative.
+func resolvePolicy(c *cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
+	if c.sandboxUpdate {
+		return nil, nil
+	}
+	if !c.sandbox {
+		if harness.HasProjectPolicy(cwd) {
+			fmt.Fprintf(stderr, "rnes: note: %s is ignored without -sandbox\n", harness.ProjectPolicyRel)
+		}
+		return nil, nil
+	}
+	raw, pol, found, err := harness.LoadProjectPolicy(cwd)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := harness.EnsureProjectDir(cwd); err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	if c.githubToken != "" && !harness.GitHubHostsAllowed(pol) {
+		fmt.Fprintf(stderr, "rnes: warning: RNES_GITHUB_TOKEN is ignored because %s doesn't allow %s\n", harness.ProjectPolicyRel, strings.Join(proxy.GitHubHosts, " and "))
+		c.githubToken = ""
+	}
+	hosts := pol.SortedAllow()
+	if len(hosts) == 0 {
+		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): none (model server only)\n", harness.ProjectPolicyRel)
+	} else {
+		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(hosts, ", "))
+	}
+	return raw, nil
 }
 
 // githubTokenFromEnv returns RNES_GITHUB_TOKEN and removes it from rnes's
@@ -241,6 +286,7 @@ func parseFlags() (cliConfig, error) {
 	flag.StringVar(&cfg.image, "image", "", "bundled sandbox image to use (default "+images.Default+"; available: "+strings.Join(images.Names(), ", ")+"); requires -sandbox")
 	flag.BoolVar(&cfg.build, "build", false, "rebuild the sandbox image from scratch, without docker's layer cache, even if it exists (it is built when missing, never pulled); requires -sandbox")
 	flag.BoolVar(&cfg.sandboxUpdate, "sandbox-update", false, "rebuild the sandbox images (every bundled one, or just -image if given; plus the base and the proxy image) from scratch, without docker's layer cache, so it picks up new apt packages and a newer @opencode/cli, then exit without running the agent; implies -sandbox")
+	flag.BoolVar(&cfg.generatePolicy, "generate-policy", false, "write a starter .rnes/policy.txt in the current directory for -sandbox and exit without running the agent")
 	flag.BoolVar(&cfg.allNet, "all-net", false, "let the sandbox reach any public host over http(s), not just the default allow-list (your machine and LAN stay blocked apart from llama-server); requires -sandbox")
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
 	flag.Var(&cfg.skills, "skill", "attach a host opencode skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then ~/.config/opencode/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
@@ -280,14 +326,25 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolving current directory: %w", err)
 	}
-	// Before anything starts, so a bad -skill (an ambiguous name, say) fails
-	// with no server or container left behind.
+	if cfg.generatePolicy {
+		if _, err := harness.GeneratePolicy(cwd); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "rnes: wrote %s\n", harness.ProjectPolicyRel)
+		return nil
+	}
+	// Before anything starts, so a bad -skill or .rnes/policy.txt fails with
+	// no server or container left behind.
 	attached, err := resolveSkills(cfg, home, cwd, os.Stderr)
 	if err != nil {
 		return err
 	}
+	policyBytes, err := resolvePolicy(&cfg, cwd, os.Stderr)
+	if err != nil {
+		return err
+	}
 
-	h, err := harness.New(cfg.harness, harness.Options{Sandbox: cfg.sandbox, Image: cfg.image, Build: cfg.build, AllNet: cfg.allNet, NoInspect: cfg.noInspect, GitHubToken: cfg.githubToken, OpenRouterKey: cfg.openrouterKey, Skills: attached})
+	h, err := harness.New(cfg.harness, harness.Options{Sandbox: cfg.sandbox, Image: cfg.image, Build: cfg.build, AllNet: cfg.allNet, NoInspect: cfg.noInspect, GitHubToken: cfg.githubToken, OpenRouterKey: cfg.openrouterKey, Skills: attached, Policy: policyBytes})
 	if err != nil {
 		return err
 	}

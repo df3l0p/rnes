@@ -99,6 +99,9 @@ type Sandbox struct {
 	openrouterPlaceholder string
 	// skills are mounted read-only under containerSkillsDir.
 	skills []skills.Skill
+	// customPolicy, when non-nil, replaces defaultPolicy as the base of the
+	// session's egress allow-list (see Options.Policy).
+	customPolicy []byte
 	// configHome is the host staging directory mounted as the agent's
 	// ~/.config when skills are attached, set by Run.
 	configHome string
@@ -128,7 +131,7 @@ func newSandbox(opts Options, hostConfig string) *Sandbox {
 	if name == "" {
 		name = images.Default
 	}
-	return &Sandbox{name: name, build: opts.Build, allNet: opts.AllNet, inspect: !opts.NoInspect, githubToken: opts.GitHubToken, openrouterKey: opts.OpenRouterKey, skills: opts.Skills, hostConfig: hostConfig, hostIP: "host-gateway"}
+	return &Sandbox{name: name, build: opts.Build, allNet: opts.AllNet, inspect: !opts.NoInspect, githubToken: opts.GitHubToken, openrouterKey: opts.OpenRouterKey, skills: opts.Skills, customPolicy: opts.Policy, hostConfig: hostConfig, hostIP: "host-gateway"}
 }
 
 // BindHost returns the address llama-server should listen on so the container
@@ -328,6 +331,11 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	if err := s.applyModel(providerKey, modelID); err != nil {
 		return err
 	}
+	// Ensure <dir>/.rnes exists on the host (owned by the user, never a
+	// symlink) so runArgs can always bind-mount it read-only at /workspace/.rnes.
+	if _, err := EnsureProjectDir(dir); err != nil {
+		return err
+	}
 
 	// The staged ~/.config holds the attached skills' mount points and the
 	// skill commands, so it exists when either does: the project's own skills
@@ -391,7 +399,15 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	runErr := cmd.Run()
+
+	// Stop the proxy before reading its log so the follower has flushed any
+	// final lines; defer pn.stop() above remains a no-op backstop.
+	pn.stop()
+	if summary := BlockedSummary(pn.logFile); summary != "" {
+		fmt.Fprintf(os.Stderr, "rnes: proxy blocked: %s (see %s)\n", summary, pn.logFile)
+	}
+	return runErr
 }
 
 // applyModel makes the session start on providerKey/modelID. The harness's
@@ -413,14 +429,18 @@ func (s *Sandbox) applyModel(providerKey, modelID string) error {
 	return nil
 }
 
-// policy is this session's proxy allow-list: the shipped defaults plus
-// llama-server, and with -all-net any public host. Built fresh each
-// call, so sessions never share or change defaultPolicy.
+// policy is this session's proxy allow-list: the project's policy (or the
+// shipped defaults) plus llama-server, and with -all-net any public host.
+// Built fresh each call, so sessions never share or change defaultPolicy.
 func (s *Sandbox) policy() []byte {
 	var b bytes.Buffer
-	b.Write(defaultPolicy)
+	if s.customPolicy != nil {
+		b.Write(s.customPolicy)
+	} else {
+		b.Write(defaultPolicy)
+	}
 	if s.modelServer != "" {
-		b.WriteString("\n# this session's llama-server\n" + s.modelServer + "\n")
+		b.WriteString("\n# this session's llama-server\nprivate " + s.modelServer + "\n")
 	}
 	if s.openrouterKey != "" {
 		b.WriteString("\n# OpenRouter (RNES_OPENROUTER_API_KEY is set)\nopenrouter.ai:443\n")
@@ -446,6 +466,8 @@ func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
 		// docker fetch one from a registry behind our back.
 		"run", "--rm", "--pull=never", flags,
 		"--name", name,
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
 		"--network", pn.network,
 		"-e", "HTTP_PROXY=" + pn.proxyURL(),
 		"-e", "HTTPS_PROXY=" + pn.proxyURL(),
@@ -459,6 +481,7 @@ func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
 		"-e", "HOME=" + containerHome,
 		"-e", "OPENCODE_CONFIG=" + containerConfigPath,
 		"-v", dir + ":" + containerWorkdir,
+		"--mount", bindMount(filepath.Join(dir, ProjectStateDir), containerWorkdir+"/"+ProjectStateDir, true),
 		"-v", s.generated + ":" + containerConfigPath + ":ro",
 	}
 	// The proxy terminates TLS for some hosts with its own CA: trust it, via

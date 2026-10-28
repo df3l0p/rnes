@@ -61,7 +61,8 @@ the session's generated config so it starts on it.
 | `-image`    | `default`                                         | Bundled sandbox image to use (see below; requires `-sandbox`) |
 | `-build`    | off                                               | Rebuild the sandbox image even if it exists (requires `-sandbox`) |
 | `-sandbox-update` | off                                         | Rebuild the sandbox images (all, or just `-image`) from scratch, then exit without running the agent (implies `-sandbox` and `-build`) |
-| `-all-net`  | off                                               | Let the sandbox reach any public host, not just the default allow-list (requires `-sandbox`; see below) |
+| `-generate-policy` | off                                        | Write a starter `.rnes/policy.txt` in the current directory for `-sandbox`, then exit without running the agent |
+| `-all-net`  | off                                               | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
 | `-skill`    | none                                              | Attach a host skill to the sandbox, read-only: a name, a path to a skill directory, or `all`. Repeatable (requires `-sandbox`; see *Skills* below) |
 | `-skills-dir` | none                                            | Add a host folder of skills to search, before the default ones, for `-skill` names and `all`; attaches nothing on its own. Repeatable (requires `-sandbox`) |
@@ -100,9 +101,11 @@ with an error rather than silently using the wrong model — stop it or use
 host. The llama-server still runs on the host; the sandbox container has no
 direct route to it and instead reaches it through its per-session egress
 proxy, which is what resolves `host.docker.internal`. The current directory
-is bind-mounted at `/workspace`, and the container runs as your uid/gid so
-files it writes keep your ownership. Only `docker` is needed on the host (not
-opencode).
+is bind-mounted at `/workspace` (with `<cwd>/.rnes` mounted read-only at
+`/workspace/.rnes`), and the container runs as your uid/gid with all Linux
+capabilities dropped (`--cap-drop=ALL`) and `no-new-privileges` enabled so
+files it writes keep your ownership and SUID/capability elevation is disabled.
+Only `docker` is needed on the host (not opencode).
 
 - **Config:** `rnes` generates a private copy of your opencode config with the
   `llama-cpp` provider's `baseURL` rewritten for the container and mounts it
@@ -148,29 +151,49 @@ opencode).
 - **Egress:** the sandbox container has no direct network access. Instead,
   each session gets its own proxy container on a private network between the
   two, and all of the sandbox's HTTP(S) traffic is forced through it via
-  `HTTP_PROXY`/`HTTPS_PROXY`. The proxy only allows the session's model
-  server plus `registry.npmjs.org`, `github.com`, `api.github.com` and
+  `HTTP_PROXY`/`HTTPS_PROXY`. By default, the proxy only allows the session's
+  model server plus `registry.npmjs.org`, `github.com`, `api.github.com` and
   `models.dev` (all over https) and blocks everything else, including non-HTTP
-  protocols such as git over ssh. Those defaults live in
-  `internal/harness/policy.txt` (one `host:port` per line), built into `rnes`.
-  `-all-net` opens the sandbox up to any public host over http(s) instead;
-  your machine, your LAN and other private or VPN ranges stay blocked even
-  by IP (the proxy checks the address it actually connects to), apart from
-  llama-server. A blocked host shows up to the agent as a 403 response from
-  `rnes-proxy`. The proxy container itself
-  reaches the host over the default Docker bridge, same as llama-server's own listen
-  address above, so on Linux a host firewall (e.g. `ufw`) may still need to
-  allow bridge-to-host traffic, and other containers on that bridge can
-  still reach llama-server directly. The first `-sandbox` run also builds
-  the proxy image (pulling the `golang` and `alpine` base images); both the
-  network and the proxy container are torn down when the session ends.
-- **TLS interception:** by default the proxy decrypts HTTPS to the hosts on
-  its allow-list so it can log what the agent does with them: one line per
-  request in `$TMPDIR/rnes-proxy-<id>.log` (the path is printed at startup, and
-  the file is kept after the session) with the method, host, path, status and
-  duration, and never the query string, headers or bodies. Hosts opened only by
-  `-all-net` are not decrypted; they stay tunnelled with their real
-  certificates. `-no-inspect` turns the whole thing off.
+  protocols such as git over ssh. Those built-in defaults live in
+  `internal/harness/policy.txt` (one `host:port` per line).
+  - *Per-project policy (`.rnes/policy.txt`):* run `rnes -generate-policy` in a
+    project to write a starter `.rnes/policy.txt` (it refuses to overwrite an
+    existing file). When `.rnes/policy.txt` is present, `-sandbox` uses it
+    instead of the built-in defaults (still adding the session's llama-server,
+    and `openrouter.ai:443` when `RNES_OPENROUTER_API_KEY` is set) and prints
+    the active allow-list at startup; an empty `.rnes/policy.txt` restricts the
+    sandbox to llama-server alone. Wildcard `*` is not permitted in
+    `.rnes/policy.txt` (use `-all-net` on the command line instead). Every
+    `-sandbox` run ensures `<cwd>/.rnes` exists on the host (an empty directory
+    is invisible to `git status`) and mounts it read-only at
+    `/workspace/.rnes` (rejecting symlinks), so an agent inside the container
+    can never create, edit or remove `.rnes/policy.txt`. Without `-sandbox`, an
+    existing `.rnes/policy.txt` is ignored with a note.
+  - `-all-net` opens the sandbox up to any public host over http(s) instead.
+    Every destination other than llama-server — whether listed in `policy.txt`
+    or opened by `-all-net` — must resolve to a public unicast IP when dialed,
+    keeping your machine, `169.254.169.254` (cloud metadata), your LAN and VPN
+    / CGNAT ranges blocked even against DNS rebinding.
+  - A blocked host shows up to the agent as a 403 response from `rnes-proxy`,
+    and when the session ends `rnes` prints a summary of any blocked
+    `host:port` attempts from the proxy log.
+  - The proxy container itself reaches the host over the default Docker bridge,
+    same as llama-server's own listen address above, so on Linux a host
+    firewall (e.g. `ufw`) may still need to allow bridge-to-host traffic, and
+    other containers on that bridge can still reach llama-server directly. The
+    first `-sandbox` run also builds the proxy image (pulling the `golang` and
+    `alpine` base images); both the network and the proxy container are torn
+    down when the session ends.
+- **TLS interception & audit log:** `$TMPDIR/rnes-proxy-<id>.log` (printed at
+  startup and kept after the session) records every proxied or denied request.
+  By default the proxy decrypts HTTPS to the hosts on its allow-list so it can
+  log each request with the method, host, path, status and duration — and never
+  the query string, headers or bodies. Plain `http://` forwards are logged the
+  same way; blind `CONNECT` tunnels (such as hosts opened only by `-all-net`,
+  which stay tunnelled with their real certificates) log `CONNECT <host:port> ->
+  tunnelled`; blocked attempts log `denied <host:port>`. `-no-inspect` turns TLS
+  decryption off while keeping host-level `CONNECT`, `http://` and `denied`
+  logging.
   - *The CA:* the proxy creates a certificate authority for each session. Its
     private key lives only in the proxy's memory: it is never written to disk
     and never reaches the sandbox. The CA is restricted (an x509 name
@@ -206,8 +229,10 @@ opencode).
     proxy doesn't restrict reads or writes. Use a fine-grained token scoped to
     what the agent needs. `export RNES_GITHUB_TOKEN=$(gh auth token)` reuses your
     `gh` login, whose scopes are broad.
-  - Requires `-sandbox` (ignored with a note otherwise) and TLS interception:
-    `rnes` refuses `-no-inspect` while the variable is set.
+  - Requires `-sandbox` (ignored with a note otherwise), TLS interception
+    (`rnes` refuses `-no-inspect` while the variable is set), and both
+    `github.com:443` and `api.github.com:443` in the policy (if a custom
+    `.rnes/policy.txt` omits either, the token is ignored with a warning).
 - **OpenRouter models:** with `RNES_OPENROUTER_API_KEY` set, the sandbox can use
   OpenRouter models alongside the local llama-server, without the key ever being
   inside it. Local llama stays the default (`-model` is unchanged); switch to

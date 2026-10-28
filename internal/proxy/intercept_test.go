@@ -73,6 +73,10 @@ func newUpstream(t *testing.T, h http.Handler) (hostport string, trust *x509.Cer
 	return "localhost:" + mustParseURL(t, srv.URL).Port(), trust
 }
 
+func newTLSConfig(roots *x509.CertPool) *tls.Config {
+	return &tls.Config{RootCAs: roots}
+}
+
 // newProxyFor starts the proxy with policy allowing hostport and a CA that
 // covers localhost, plus an audit log, trusting upstreamTrust for the real
 // upstream. It returns the proxy's URL, its CA and the audit log.
@@ -84,10 +88,10 @@ func newProxyFor(t *testing.T, hostport string, upstreamTrust *x509.CertPool) (*
 	}
 	audit := &auditLog{}
 	srv := &Server{
-		Policy:      NewPolicy([]string{hostport}),
+		Policy:      NewPrivatePolicy([]string{hostport}),
 		CA:          ca,
 		Logf:        audit.Logf,
-		UpstreamTLS: &tls.Config{RootCAs: upstreamTrust},
+		UpstreamTLS: newTLSConfig(upstreamTrust),
 	}
 	px := httptest.NewServer(srv)
 	t.Cleanup(px.Close)
@@ -230,7 +234,7 @@ func TestInterceptLeavesHostsOutsideTheCAAsBlindTunnels(t *testing.T) {
 		t.Fatalf("NewCA: %v", err)
 	}
 	audit := &auditLog{}
-	srv := &Server{Policy: NewPolicy([]string{hostport}), CA: otherCA, Logf: audit.Logf}
+	srv := &Server{Policy: NewPrivatePolicy([]string{hostport}), CA: otherCA, Logf: audit.Logf}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -245,8 +249,12 @@ func TestInterceptLeavesHostsOutsideTheCAAsBlindTunnels(t *testing.T) {
 	if string(body) != "real upstream" {
 		t.Errorf("body = %q, want %q", body, "real upstream")
 	}
-	if got := audit.String(); got != "" {
-		t.Errorf("a blind tunnel must not produce audit lines, got %q", got)
+	got := audit.String()
+	if !strings.Contains(got, "CONNECT "+hostport+" -> tunnelled") {
+		t.Errorf("a blind tunnel should log the CONNECT target, got %q", got)
+	}
+	if strings.Contains(got, "GET https://") {
+		t.Errorf("a blind tunnel must not decrypt or log inner HTTP requests, got %q", got)
 	}
 }
 
@@ -336,7 +344,7 @@ func TestInterceptOnRequestHookCanChangeTheRequest(t *testing.T) {
 	ca, _ := NewCA([]string{"localhost"})
 	var hookTarget string
 	srv := &Server{
-		Policy:      NewPolicy([]string{hostport}),
+		Policy:      NewPrivatePolicy([]string{hostport}),
 		CA:          ca,
 		Logf:        (&auditLog{}).Logf,
 		UpstreamTLS: &tls.Config{RootCAs: upstreamTrust},
@@ -369,7 +377,7 @@ func TestInterceptOnRequestHookErrorAnswers403(t *testing.T) {
 	}))
 	ca, _ := NewCA([]string{"localhost"})
 	srv := &Server{
-		Policy:      NewPolicy([]string{hostport}),
+		Policy:      NewPrivatePolicy([]string{hostport}),
 		CA:          ca,
 		Logf:        (&auditLog{}).Logf,
 		UpstreamTLS: &tls.Config{RootCAs: upstreamTrust},

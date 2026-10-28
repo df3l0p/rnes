@@ -201,6 +201,8 @@ func TestSandboxRunArgs(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"run --rm --pull=never -i --name rnes-1-aa",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
 		"--network rnes-net-1-aa",
 		"-e HTTP_PROXY=http://rnes-proxy-1-aa:8888",
 		"-e HTTPS_PROXY=http://rnes-proxy-1-aa:8888",
@@ -209,6 +211,7 @@ func TestSandboxRunArgs(t *testing.T) {
 		"-e NO_PROXY=localhost,127.0.0.1,::1",
 		"-e no_proxy=localhost,127.0.0.1,::1",
 		"-v /work/proj:/workspace",
+		"--mount type=bind,source=/work/proj/.rnes,target=/workspace/.rnes,readonly",
 		"-v /tmp/gen.jsonc:/etc/rnes/opencode.jsonc:ro",
 		"-e OPENCODE_CONFIG=/etc/rnes/opencode.jsonc",
 		"rnes-sandbox-default:abc123 .",
@@ -636,7 +639,7 @@ func TestSandboxRunArgsWithoutSkillsAreUnchanged(t *testing.T) {
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
 	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
 	joined := strings.Join(s.runArgs("rnes-1-aa", "/work/proj", pn, false), " ")
-	for _, bad := range []string{"--mount", ".config", "skills"} {
+	for _, bad := range []string{".config", "skills"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("without skills, args must not mention %q: %s", bad, joined)
 		}

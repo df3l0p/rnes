@@ -40,12 +40,13 @@ func TestHandleForwardAllowsConfiguredHost(t *testing.T) {
 	defer backend.Close()
 	backendHost := mustParseURL(t, backend.URL).Host
 
-	srv := &Server{Policy: NewPolicy([]string{backendHost})}
+	audit := &auditLog{}
+	srv := &Server{Policy: NewPrivatePolicy([]string{backendHost}), Logf: audit.Logf}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(t, px.URL))}}
-	resp, err := client.Get(backend.URL)
+	resp, err := client.Get(backend.URL + "/upload/test.bin?secret=123")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -53,6 +54,10 @@ func TestHandleForwardAllowsConfiguredHost(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "backend ok" {
 		t.Errorf("body = %q, want %q", body, "backend ok")
+	}
+	line := waitForLog(t, audit, "/upload/test.bin")
+	if !strings.Contains(line, "GET http://"+backendHost+"/upload/test.bin -> 200") || strings.Contains(line, "secret") {
+		t.Errorf("forward audit log = %q, want method/host/path/status without query", line)
 	}
 }
 
@@ -63,7 +68,8 @@ func TestHandleForwardBlocksUnconfiguredHost(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{Policy: NewPolicy(nil)} // empty allow-list
+	audit := &auditLog{}
+	srv := &Server{Policy: NewPolicy(nil), Logf: audit.Logf} // empty allow-list
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -78,6 +84,9 @@ func TestHandleForwardBlocksUnconfiguredHost(t *testing.T) {
 	}
 	if reached {
 		t.Error("backend must not be reached for a blocked host")
+	}
+	if !strings.Contains(audit.String(), "rnes-proxy: denied "+mustParseURL(t, backend.URL).Host) {
+		t.Errorf("denied log = %q", audit.String())
 	}
 }
 
@@ -96,7 +105,7 @@ func TestHandleForwardStreamsChunksWithoutBuffering(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{Policy: NewPolicy([]string{mustParseURL(t, backend.URL).Host})}
+	srv := &Server{Policy: NewPrivatePolicy([]string{mustParseURL(t, backend.URL).Host})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 	// Deferred after the servers, so it runs before their Close: each Close
@@ -152,7 +161,7 @@ func TestHandleForwardDropsHopByHopHeaders(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{Policy: NewPolicy([]string{mustParseURL(t, backend.URL).Host})}
+	srv := &Server{Policy: NewPrivatePolicy([]string{mustParseURL(t, backend.URL).Host})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -204,7 +213,7 @@ func TestHandleConnectTunnelsAllowedHost(t *testing.T) {
 		io.Copy(conn, conn) // echo
 	}()
 
-	srv := &Server{Policy: NewPolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -260,7 +269,7 @@ func TestHandleConnectFlushesHijackBufferedBytes(t *testing.T) {
 		}
 	}()
 
-	srv := &Server{Policy: NewPolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -356,7 +365,7 @@ func TestHandleConnectKeepsTheResponseAfterAClientHalfClose(t *testing.T) {
 		conn.Write([]byte("pong"))
 	}()
 
-	srv := &Server{Policy: NewPolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -403,7 +412,7 @@ func TestPolicyMatchesHostsCaseInsensitively(t *testing.T) {
 // end and its reader.
 func connectThroughProxy(t *testing.T, target string) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	px := httptest.NewServer(&Server{Policy: NewPolicy([]string{target}), HalfCloseIdle: 100 * time.Millisecond})
+	px := httptest.NewServer(&Server{Policy: NewPrivatePolicy([]string{target}), HalfCloseIdle: 100 * time.Millisecond})
 	t.Cleanup(px.Close)
 	conn, err := net.Dial("tcp", mustParseURL(t, px.URL).Host)
 	if err != nil {

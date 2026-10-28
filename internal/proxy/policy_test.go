@@ -85,3 +85,35 @@ func TestParsePolicyStarAllowsAnyPublicHost(t *testing.T) {
 		t.Error("Explicit must report only listed entries, not ones allowed by *")
 	}
 }
+
+func TestParsePolicyPrivateEntry(t *testing.T) {
+	pol, err := ParsePolicy(strings.NewReader("private host.docker.internal:8080 # llama-server\ngithub.com:443\n"))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	if !pol.Explicit("host.docker.internal:8080") || !pol.AllowsPrivate("host.docker.internal:8080") {
+		t.Errorf("private entry must be both Explicit and AllowsPrivate: %+v", pol)
+	}
+	if !pol.Explicit("github.com:443") || pol.AllowsPrivate("github.com:443") {
+		t.Errorf("ordinary entry must be Explicit and not AllowsPrivate: %+v", pol)
+	}
+	if got := strings.Join(pol.DNSHosts(), ","); got != "github.com,host.docker.internal" {
+		t.Errorf("DNSHosts = %q", got)
+	}
+	if got := strings.Join(pol.SortedAllow(), ","); got != "github.com:443,host.docker.internal:8080" {
+		t.Errorf("SortedAllow = %q", got)
+	}
+}
+
+func TestParseUserPolicyRejectsStarAndPrivate(t *testing.T) {
+	pol, err := ParseUserPolicy(strings.NewReader("# comment\npypi.org:443\n"))
+	if err != nil || !pol.Explicit("pypi.org:443") || pol.AnyPublic || pol.AllowsPrivate("pypi.org:443") {
+		t.Fatalf("ParseUserPolicy valid = (%+v, %v)", pol, err)
+	}
+	if _, err := ParseUserPolicy(strings.NewReader("pypi.org:443\n*\n")); err == nil || !strings.Contains(err.Error(), "-all-net") {
+		t.Errorf("ParseUserPolicy(*) = %v, want error naming -all-net", err)
+	}
+	if _, err := ParseUserPolicy(strings.NewReader("private host.docker.internal:8080\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("ParseUserPolicy(private) = %v, want line 1 error", err)
+	}
+}

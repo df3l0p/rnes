@@ -31,13 +31,14 @@ func isPublic(ip net.IP) bool {
 	return true
 }
 
-// directDialer reaches destinations the policy lists explicitly, whatever
-// their address (llama-server is on the host).
+// directDialer reaches destinations explicitly permitted to connect to a
+// non-public address (the host's llama-server).
 var directDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
-// publicDialer reaches destinations allowed only by *. It checks the address
-// it's actually connecting to, after DNS resolution, so a name that resolves
-// to a private address can't slip through.
+// publicDialer reaches all other destinations — both explicit policy entries
+// and hosts allowed by *. It checks the address it's actually connecting to,
+// after DNS resolution, so a name in policy.txt that resolves (or rebinds) to
+// a private or link-local metadata address can't slip through.
 var publicDialer = &net.Dialer{
 	Timeout:   30 * time.Second,
 	KeepAlive: 30 * time.Second,
@@ -60,10 +61,10 @@ var publicTransport = func() *http.Transport {
 	return t
 }()
 
-// dialerFor picks how to reach hostport: directly if the policy lists it,
-// otherwise public addresses only.
+// dialerFor picks how to reach hostport: directly only if the policy permits
+// non-public addresses for it, otherwise public addresses only.
 func (s *Server) dialerFor(hostport string) *net.Dialer {
-	if s.Policy.Explicit(hostport) {
+	if s.Policy.AllowsPrivate(hostport) {
 		return directDialer
 	}
 	return publicDialer
@@ -71,17 +72,17 @@ func (s *Server) dialerFor(hostport string) *net.Dialer {
 
 // transportFor is dialerFor for the forward path.
 func (s *Server) transportFor(hostport string) *http.Transport {
-	if s.Policy.Explicit(hostport) {
+	if s.Policy.AllowsPrivate(hostport) {
 		return forwardTransport
 	}
 	return publicTransport
 }
 
 // dialFailed answers a request whose upstream couldn't be reached: 403 when
-// the policy's public-only rule refused it, 502 otherwise.
-func dialFailed(w http.ResponseWriter, target string, err error) {
+// the public-address rule refused it, 502 otherwise.
+func (s *Server) dialFailed(w http.ResponseWriter, target string, err error) {
 	if errors.Is(err, errNotPublic) {
-		denied(w, target+" (not a public address)")
+		s.denied(w, target+" (not a public address)")
 		return
 	}
 	http.Error(w, "rnes-proxy: dial upstream: "+err.Error(), http.StatusBadGateway)
