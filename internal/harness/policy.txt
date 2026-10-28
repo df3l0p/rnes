@@ -1,7 +1,11 @@
-# What every sandbox may reach through its egress proxy, one host:port per
-# line; '#' starts a comment. rnes appends the session's llama-server
-# (host.docker.internal:<port>) and mounts the result into the proxy as
-# /etc/rnes-proxy/policy.txt. Everything else is blocked.
+# Sandbox network allow-list (.rnes/policy.txt overrides these built-in defaults).
+#
+# One host:port per line; '#' starts a comment. Everything else is blocked
+# (403 from rnes-proxy). This session's llama-server (and any configured
+# cloud model provider) are added automatically.
+# Wildcard '*' is not allowed in .rnes/policy.txt; pass -all-net on the command
+# line instead. Remove all entries below to restrict the sandbox to llama-server
+# only.
 
 # npm packages
 registry.npmjs.org:443
@@ -10,3 +14,11 @@ github.com:443
 api.github.com:443
 # the model catalog opencode fetches at startup
 models.dev:443
+
+# Common package registries (uncomment as needed):
+# proxy.golang.org:443
+# sum.golang.org:443
+# pypi.org:443
+# files.pythonhosted.org:443
+# crates.io:443
+# static.crates.io:443

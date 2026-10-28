@@ -54,7 +54,15 @@ func main() {
 				log.Fatalf("rnes-proxy: %v", err)
 			}
 			for _, p := range inj.Providers {
-				fmt.Printf("rnes-proxy: provider %s will be injected at %v\n", p.Name(), p.Hosts())
+				var active []string
+				for _, h := range p.Hosts() {
+					if pol.Explicit(h) {
+						active = append(active, h)
+					}
+				}
+				if len(active) > 0 {
+					fmt.Printf("rnes-proxy: provider %s will be injected at %v\n", p.Name(), active)
+				}
 			}
 			srv.OnRequest = inj.OnRequest
 		}

@@ -24,6 +24,9 @@ func TestGeneratePolicyWritesTemplateAndRefusesOverwriteOrSymlink(t *testing.T) 
 	if err != nil || !found {
 		t.Fatalf("LoadProjectPolicy: found=%v err=%v", found, err)
 	}
+	if !bytes.Equal(raw, defaultPolicy) {
+		t.Errorf("generated policy doesn't match policy.txt:\ngot:\n%s\nwant:\n%s", raw, defaultPolicy)
+	}
 	defPol, err := proxy.ParsePolicy(bytes.NewReader(defaultPolicy))
 	if err != nil {
 		t.Fatal(err)
@@ -158,17 +161,6 @@ func TestSandboxRunRefusesSymlinkProjectDir(t *testing.T) {
 	}
 	if got := calls(t, logPath); len(got) != 0 {
 		t.Errorf("docker must not be called when .rnes is a symlink, got %v", got)
-	}
-}
-
-func TestGitHubHostsAllowed(t *testing.T) {
-	both, _ := proxy.ParseUserPolicy(strings.NewReader("github.com:443\napi.github.com:443\n"))
-	if !GitHubHostsAllowed(both) {
-		t.Error("expected GitHubHostsAllowed = true when both hosts are listed")
-	}
-	partial, _ := proxy.ParseUserPolicy(strings.NewReader("github.com:443\n"))
-	if GitHubHostsAllowed(partial) {
-		t.Error("expected GitHubHostsAllowed = false when api.github.com:443 is missing")
 	}
 }
 

@@ -194,9 +194,7 @@ func resolveSkills(c cliConfig, home, cwd string, stderr io.Writer) ([]skills.Sk
 
 // resolvePolicy prepares <cwd>/.rnes and loads <cwd>/.rnes/policy.txt for a
 // sandbox session, or notes that the file is ignored when running on the host.
-// If a custom policy omits GitHub's hosts, RNES_GITHUB_TOKEN is dropped with a
-// warning so the policy stays authoritative.
-func resolvePolicy(c *cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
+func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	if c.sandboxUpdate {
 		return nil, nil
 	}
@@ -215,10 +213,6 @@ func resolvePolicy(c *cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	}
 	if !found {
 		return nil, nil
-	}
-	if c.githubToken != "" && !harness.GitHubHostsAllowed(pol) {
-		fmt.Fprintf(stderr, "rnes: warning: RNES_GITHUB_TOKEN is ignored because %s doesn't allow %s\n", harness.ProjectPolicyRel, strings.Join(proxy.GitHubHosts, " and "))
-		c.githubToken = ""
 	}
 	hosts := pol.SortedAllow()
 	if len(hosts) == 0 {
@@ -339,7 +333,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	policyBytes, err := resolvePolicy(&cfg, cwd, os.Stderr)
+	policyBytes, err := resolvePolicy(cfg, cwd, os.Stderr)
 	if err != nil {
 		return err
 	}

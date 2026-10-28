@@ -288,26 +288,26 @@ func TestValidateRejectsGeneratePolicyWithSandboxUpdate(t *testing.T) {
 	}
 }
 
-func TestResolvePolicyHandlesHostSandboxAndGitHubTokenGating(t *testing.T) {
+func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	// Without .rnes/policy.txt: sandbox creates .rnes/ and returns nil policy.
 	cwd := t.TempDir()
 	var buf bytes.Buffer
 	cfg := cliConfig{sandbox: true, githubToken: "github_pat_x"}
-	raw, err := resolvePolicy(&cfg, cwd, &buf)
-	if err != nil || raw != nil || buf.Len() != 0 || cfg.githubToken != "github_pat_x" {
-		t.Fatalf("no policy file = (raw=%v, err=%v, out=%q, tok=%q)", raw, err, buf.String(), cfg.githubToken)
+	raw, err := resolvePolicy(cfg, cwd, &buf)
+	if err != nil || raw != nil || buf.Len() != 0 {
+		t.Fatalf("no policy file = (raw=%v, err=%v, out=%q)", raw, err, buf.String())
 	}
 	if fi, err := os.Lstat(filepath.Join(cwd, ".rnes")); err != nil || !fi.IsDir() {
 		t.Fatalf("expected .rnes dir created for sandbox, fi=%v err=%v", fi, err)
 	}
 
-	// Generate starter policy -> keeps GitHub token since GitHub hosts are present.
+	// Generated starter policy prints active hosts.
 	if _, err := harness.GeneratePolicy(cwd); err != nil {
 		t.Fatal(err)
 	}
-	raw, err = resolvePolicy(&cfg, cwd, &buf)
-	if err != nil || raw == nil || cfg.githubToken != "github_pat_x" {
-		t.Fatalf("generated policy = (rawNil=%v, err=%v, tok=%q)", raw == nil, err, cfg.githubToken)
+	raw, err = resolvePolicy(cfg, cwd, &buf)
+	if err != nil || raw == nil {
+		t.Fatalf("generated policy = (rawNil=%v, err=%v)", raw == nil, err)
 	}
 	if !strings.Contains(buf.String(), "rnes: sandbox policy (.rnes/policy.txt):") {
 		t.Errorf("startup output missing policy line: %q", buf.String())
@@ -315,26 +315,22 @@ func TestResolvePolicyHandlesHostSandboxAndGitHubTokenGating(t *testing.T) {
 
 	// Host mode (no -sandbox) prints a note and leaves .rnes untouched.
 	buf.Reset()
-	hostCfg := cliConfig{}
-	raw, err = resolvePolicy(&hostCfg, cwd, &buf)
+	raw, err = resolvePolicy(cliConfig{}, cwd, &buf)
 	if err != nil || raw != nil || !strings.Contains(buf.String(), "ignored without -sandbox") {
 		t.Errorf("host mode with policy file = (raw=%v, err=%v, out=%q)", raw, err, buf.String())
 	}
 
-	// Custom policy without GitHub hosts drops RNES_GITHUB_TOKEN with a warning.
+	// Custom policy prints only the configured hosts (the proxy blocks any
+	// omitted provider hosts on its own, without per-provider checks in rnes).
 	buf.Reset()
 	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("pypi.org:443\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	noGHCfg := cliConfig{sandbox: true, githubToken: "github_pat_x"}
-	raw, err = resolvePolicy(&noGHCfg, cwd, &buf)
+	raw, err = resolvePolicy(cfg, cwd, &buf)
 	if err != nil || string(raw) != "pypi.org:443\n" {
 		t.Fatalf("pypi policy = (%q, %v)", raw, err)
 	}
-	if noGHCfg.githubToken != "" {
-		t.Errorf("githubToken = %q, want cleared when policy omits GitHub", noGHCfg.githubToken)
-	}
-	if !strings.Contains(buf.String(), "warning: RNES_GITHUB_TOKEN is ignored") || !strings.Contains(buf.String(), "pypi.org:443") {
+	if !strings.Contains(buf.String(), "pypi.org:443") || strings.Contains(buf.String(), "warning:") {
 		t.Errorf("output = %q", buf.String())
 	}
 
@@ -343,8 +339,7 @@ func TestResolvePolicyHandlesHostSandboxAndGitHubTokenGating(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("# model server only\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	emptyCfg := cliConfig{sandbox: true}
-	raw, err = resolvePolicy(&emptyCfg, cwd, &buf)
+	raw, err = resolvePolicy(cliConfig{sandbox: true}, cwd, &buf)
 	if err != nil || raw == nil || !strings.Contains(buf.String(), "none (model server only)") {
 		t.Errorf("empty policy = (rawNil=%v, err=%v, out=%q)", raw == nil, err, buf.String())
 	}

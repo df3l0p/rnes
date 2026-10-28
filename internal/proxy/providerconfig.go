@@ -73,22 +73,25 @@ func ReadProviders(r *bufio.Reader) ([]Provider, error) {
 }
 
 // InjectorFromStdin reads the provider config from r (see ReadProviders) and
-// returns the Injector for it, logging to logf. Every host a provider is bound
-// to must be listed explicitly in pol: only explicit hosts are decrypted, so a
-// credential could never be injected at any other.
+// returns the Injector for it, logging to logf. A bound host not listed
+// explicitly in pol is noted in the log rather than failing startup, so a
+// custom per-project policy can omit a provider's hosts while the credential
+// remains set in the operator's environment: omitted hosts are blocked by pol
+// (or blind-tunnelled under *, without decrypting or injecting the secret).
 func InjectorFromStdin(r *bufio.Reader, pol Policy, logf func(string, ...any)) (*Injector, error) {
 	providers, err := ReadProviders(r)
 	if err != nil {
 		return nil, err
 	}
+	in := &Injector{Providers: providers, Logf: logf}
 	for _, p := range providers {
 		for _, h := range p.Hosts() {
 			if !pol.Explicit(h) {
-				return nil, fmt.Errorf("provider %s is bound to %s, which the policy doesn't list explicitly, so it would never be decrypted", p.Name(), h)
+				in.logf("rnes-proxy: provider %s: %s is not listed explicitly in policy; credential will not be injected there", p.Name(), h)
 			}
 		}
 	}
-	return &Injector{Providers: providers, Logf: logf}, nil
+	return in, nil
 }
 
 // BuildProvider turns a config entry into its Provider ("github" or "openrouter").

@@ -82,19 +82,28 @@ func TestInjectorFromStdinBuildsTheInjectorForExplicitHosts(t *testing.T) {
 	}
 }
 
-// A bound host the policy doesn't list explicitly is never decrypted, so the
-// credential could never be injected there: refuse to start.
-func TestInjectorFromStdinRefusesBoundHostsThePolicyDoesNotList(t *testing.T) {
+// A bound host that a custom policy omits (or allows only via *) is logged
+// rather than failing proxy startup: the proxy itself blocks omitted hosts
+// (and never decrypts *-only hosts, so the credential is never injected there).
+func TestInjectorFromStdinLogsBoundHostsThePolicyDoesNotList(t *testing.T) {
 	line, _ := EncodeProviders([]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
 	pol := NewPolicy([]string{"github.com:443"}) // no api.github.com
-	_, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), pol, nil)
-	if err == nil || !strings.Contains(err.Error(), "api.github.com:443") {
-		t.Errorf("err = %v, want one naming api.github.com:443", err)
+	audit := &auditLog{}
+	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), pol, audit.Logf); err != nil {
+		t.Fatalf("InjectorFromStdin: %v", err)
 	}
-	// "*" allows the host but doesn't make it explicit.
+	if got := audit.String(); !strings.Contains(got, "provider github: api.github.com:443") || strings.Contains(got, "provider github: github.com:443") {
+		t.Errorf("log = %q, want note for api.github.com:443 only", got)
+	}
+
+	// "*" allows the host as a blind tunnel, not as an explicit decrypted entry.
 	any := Policy{Allow: map[string]bool{"github.com:443": true}, AnyPublic: true}
-	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), any, nil); err == nil {
-		t.Error("a host allowed only by * must not count as explicit")
+	audit2 := &auditLog{}
+	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), any, audit2.Logf); err != nil {
+		t.Fatalf("InjectorFromStdin with *: %v", err)
+	}
+	if !strings.Contains(audit2.String(), "api.github.com:443") {
+		t.Errorf("a host allowed only by * must still be logged as not decrypted, got %q", audit2.String())
 	}
 }
 

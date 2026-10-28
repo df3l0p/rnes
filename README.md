@@ -229,10 +229,10 @@ Only `docker` is needed on the host (not opencode).
     proxy doesn't restrict reads or writes. Use a fine-grained token scoped to
     what the agent needs. `export RNES_GITHUB_TOKEN=$(gh auth token)` reuses your
     `gh` login, whose scopes are broad.
-  - Requires `-sandbox` (ignored with a note otherwise), TLS interception
-    (`rnes` refuses `-no-inspect` while the variable is set), and both
-    `github.com:443` and `api.github.com:443` in the policy (if a custom
-    `.rnes/policy.txt` omits either, the token is ignored with a warning).
+  - Requires `-sandbox` (ignored with a note otherwise) and TLS interception:
+    `rnes` refuses `-no-inspect` while the variable is set. If a custom
+    `.rnes/policy.txt` omits either host, requests to it stay blocked by the
+    proxy.
 - **OpenRouter models:** with `RNES_OPENROUTER_API_KEY` set, the sandbox can use
   OpenRouter models alongside the local llama-server, without the key ever being
   inside it. Local llama stays the default (`-model` is unchanged); switch to

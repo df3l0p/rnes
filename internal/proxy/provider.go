@@ -60,13 +60,10 @@ func NewStaticProvider(name string, hosts []string, token, placeholder string) (
 	return &StaticProvider{name: name, hosts: hosts, token: token, placeholder: placeholder}, nil
 }
 
-// GitHubHosts are the CONNECT targets the GitHub provider injects credentials at.
-var GitHubHosts = []string{"github.com:443", "api.github.com:443"}
-
 // NewGitHubProvider is the GitHub token provider: git over https
 // (github.com) and the API that gh uses (api.github.com).
 func NewGitHubProvider(token, placeholder string) (*StaticProvider, error) {
-	return NewStaticProvider("github", GitHubHosts, token, placeholder)
+	return NewStaticProvider("github", []string{"github.com:443", "api.github.com:443"}, token, placeholder)
 }
 
 // NewOpenRouterProvider is the OpenRouter API key provider. opencode's built-in

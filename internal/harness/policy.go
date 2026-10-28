@@ -23,43 +23,6 @@ const (
 	ProjectPolicyRel = ".rnes/policy.txt"
 )
 
-const starterPolicyHeader = `# Sandbox network allow-list for this project (.rnes/policy.txt).
-#
-# One host:port per line; '#' starts a comment. Everything else is blocked
-# (403 from rnes-proxy). This session's llama-server (and openrouter.ai:443
-# when RNES_OPENROUTER_API_KEY is set) are added automatically.
-# Wildcard '*' is not allowed here; pass -all-net on the command line instead.
-# Remove all entries below to restrict the sandbox to llama-server only.
-
-`
-
-const starterPolicyFooter = `
-# Common package registries (uncomment as needed):
-# proxy.golang.org:443
-# sum.golang.org:443
-# pypi.org:443
-# files.pythonhosted.org:443
-# crates.io:443
-# static.crates.io:443
-`
-
-// starterPolicy builds the template written by GeneratePolicy, keeping the
-// active host entries derived from defaultPolicy so the two never drift.
-func starterPolicy() []byte {
-	// defaultPolicy starts with its embedded-file header followed by a blank
-	// line, then the commented host entries. Keep everything after that blank
-	// line.
-	body := defaultPolicy
-	if _, rest, ok := bytes.Cut(defaultPolicy, []byte("\n\n")); ok {
-		body = rest
-	}
-	s := string(body)
-	if !strings.HasSuffix(s, "\n") {
-		s += "\n"
-	}
-	return []byte(starterPolicyHeader + s + starterPolicyFooter)
-}
-
 // EnsureProjectDir ensures <cwd>/.rnes exists as a real directory (never a
 // symlink) owned by the current host user, returning its path.
 func EnsureProjectDir(cwd string) (string, error) {
@@ -101,7 +64,7 @@ func GeneratePolicy(cwd string) (string, error) {
 		return "", fmt.Errorf("creating %s: %w", ProjectPolicyRel, err)
 	}
 	defer f.Close()
-	if _, err := f.Write(starterPolicy()); err != nil {
+	if _, err := f.Write(defaultPolicy); err != nil {
 		os.Remove(path)
 		return "", fmt.Errorf("writing %s: %w", ProjectPolicyRel, err)
 	}
@@ -163,17 +126,6 @@ func LoadProjectPolicy(cwd string) (raw []byte, pol proxy.Policy, found bool, er
 		return nil, proxy.Policy{}, false, fmt.Errorf("parsing %s: %w", ProjectPolicyRel, err)
 	}
 	return raw, pol, true, nil
-}
-
-// GitHubHostsAllowed reports whether pol explicitly allows every host the
-// GitHub credential provider is bound to.
-func GitHubHostsAllowed(pol proxy.Policy) bool {
-	for _, h := range proxy.GitHubHosts {
-		if !pol.Explicit(h) {
-			return false
-		}
-	}
-	return true
 }
 
 // BlockedSummary reads a proxy log file and summarizes any "rnes-proxy: denied
