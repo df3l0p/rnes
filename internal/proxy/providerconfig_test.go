@@ -105,6 +105,17 @@ func TestInjectorFromStdinLogsBoundHostsThePolicyDoesNotList(t *testing.T) {
 	if !strings.Contains(audit2.String(), "api.github.com:443") {
 		t.Errorf("a host allowed only by * must still be logged as not decrypted, got %q", audit2.String())
 	}
+
+	// A host marked no-inspect is also blind-tunnelled, so credentials won't be injected there.
+	noInsp := NewPolicy([]string{"github.com:443", "api.github.com:443"})
+	noInsp.AllowNoInspect("api.github.com:443")
+	audit3 := &auditLog{}
+	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), noInsp, audit3.Logf); err != nil {
+		t.Fatalf("InjectorFromStdin with no-inspect: %v", err)
+	}
+	if !strings.Contains(audit3.String(), "provider github: api.github.com:443") {
+		t.Errorf("a no-inspect host must be logged as not decrypted, got %q", audit3.String())
+	}
 }
 
 func TestInjectorFromStdinPassesTheReadErrors(t *testing.T) {

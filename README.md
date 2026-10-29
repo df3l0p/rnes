@@ -4,6 +4,11 @@
 `llama-server` (llama.cpp) if one isn't already running, points the agent at
 it, and launches the agent in the current directory.
 
+It can also run a harness that uses its own cloud backend instead of a local
+model: `rnes -sandbox -harness agy` starts the Google Antigravity CLI (`agy`)
+against your Google subscription, with no `llama-server` involved (see
+*Antigravity* below).
+
 Concretely, running `rnes` in a project:
 
 1. Checks whether a `llama-server`/`llama serve` instance is already
@@ -17,12 +22,18 @@ Concretely, running `rnes` in a project:
 4. On exit, stops the `llama-server` it started — unless another `rnes`
    process is still using it, in which case it's left running.
 
+With a cloud harness (`agy`) steps 1, 2 and 4 are skipped: the agent talks to
+its own provider, and only the sandbox's egress proxy runs alongside it.
+
 ## Requirements
 
-- [opencode](https://opencode.ai) v2 on `PATH` (the only harness today).
-- llama.cpp on `PATH`: either the unified `llama` CLI (`llama serve`) or the
-  older standalone `llama-server` binary. On macOS, `brew install llama.cpp`
-  provides both.
+- [opencode](https://opencode.ai) v2 on `PATH` for the default `opencode`
+  harness. [`agy`](https://antigravity.google) is installed inside its sandbox
+  image, so it needs only `docker` on the host.
+- llama.cpp on `PATH` for harnesses that use a local model: either the unified
+  `llama` CLI (`llama serve`) or the older standalone `llama-server` binary. On
+  macOS, `brew install llama.cpp` provides both. Not needed for
+  `-harness agy`.
 
 ## Install
 
@@ -53,33 +64,44 @@ the session's generated config so it starts on it.
 
 | Flag        | Default                                          | Description                                     |
 |-------------|---------------------------------------------------|--------------------------------------------------|
-| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; only a sandbox session starts on it — on the host, pick it via `/models` |
-| `-host`     | `127.0.0.1`                                       | llama-server host (with `-sandbox`, the narrowest address containers can reach; see below) |
-| `-port`     | `8080`                                            | llama-server port                                |
-| `-harness`  | `opencode`                                        | Coding agent to run                              |
+| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; only a sandbox session starts on it — on the host, pick it via `/models`. With `-harness agy`, forwarded as `--model` only when given |
+| `-host`     | `127.0.0.1`                                       | llama-server host (with `-sandbox`, the narrowest address containers can reach; see below); rejected for harnesses that don't use llama-server |
+| `-port`     | `8080`                                            | llama-server port; rejected for harnesses that don't use llama-server |
+| `-harness`  | `opencode`                                        | Coding agent to run: `opencode` or `agy` (see *Antigravity* below) |
 | `-sandbox`  | off                                               | Run the agent in a Docker container (see below)  |
 | `-image`    | `default`                                         | Bundled sandbox image to use (see below; requires `-sandbox`) |
 | `-build`    | off                                               | Rebuild the sandbox image even if it exists (requires `-sandbox`) |
-| `-sandbox-update` | off                                         | Rebuild the sandbox images (all, or just `-image`) from scratch, then exit without running the agent (implies `-sandbox` and `-build`) |
+| `-sandbox-update` | off                                         | Rebuild the sandbox images from scratch, then exit without running the agent (implies `-sandbox` and `-build`). Without `-harness`, rebuilds every harness's images; with it, only that harness's (and, without `-image`, every image on its base) |
 | `-generate-policy` | off                                        | Write a starter `.rnes/policy.txt` in the current directory for `-sandbox`, then exit without running the agent |
 | `-all-net`  | off                                               | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
 | `-skill`    | none                                              | Attach a host skill to the sandbox, read-only: a name, a path to a skill directory, or `all`. Repeatable (requires `-sandbox`; see *Skills* below) |
 | `-skills-dir` | none                                            | Add a host folder of skills to search, before the default ones, for `-skill` names and `all`; attaches nothing on its own. Repeatable (requires `-sandbox`) |
 
+Arguments after `--` are forwarded to the harness executable, so flags rnes
+doesn't own reach the agent unchanged:
+
+```sh
+rnes -sandbox -harness agy -- --version
+rnes -sandbox -harness agy -- --continue
+rnes -sandbox -harness opencode -- --continue
+```
+
 Each harness owns its own config path internally (opencode's is its default
 global config, `~/.config/opencode/opencode.jsonc`) — there's no flag for it.
 `rnes` merges into that file without touching any other keys already there,
 and points the agent at it via that agent's own config env var
 (`OPENCODE_CONFIG` for opencode), so it works even if the agent's normal
-config resolution would otherwise pick something else up.
+config resolution would otherwise pick something else up. `agy` runs only in
+the sandbox and keeps its own state in a per-project Docker volume (see
+*Antigravity* below).
 
 ### Environment
 
 | Variable                  | Description |
 | ------------------------- | ----------- |
 | `RNES_GITHUB_TOKEN`       | GitHub token the sandbox's proxy injects for `git` and `gh` (requires `-sandbox`; see *GitHub credentials* below). Prefer a fine-grained token; to reuse your `gh` login, `export RNES_GITHUB_TOKEN=$(gh auth token)`. |
-| `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
+| `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; ignored with `-harness agy`; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
 
 ### Sharing a llama-server across sessions
 
@@ -105,36 +127,47 @@ is bind-mounted at `/workspace` (with `<cwd>/.rnes` mounted read-only at
 `/workspace/.rnes`), and the container runs as your uid/gid with all Linux
 capabilities dropped (`--cap-drop=ALL`) and `no-new-privileges` enabled so
 files it writes keep your ownership and SUID/capability elevation is disabled.
-Only `docker` is needed on the host (not opencode).
+Only `docker` is needed on the host (not the agent).
 
-- **Config:** `rnes` generates a private copy of your opencode config with the
-  `llama-cpp` provider's `baseURL` rewritten for the container and mounts it
-  read-only. Your real config is not modified.
+- **Config:** for the `opencode` harness, `rnes` generates a private copy of
+  your opencode config with the `llama-cpp` provider's `baseURL` rewritten for
+  the container and mounts it read-only. Your real config is not modified.
+  `agy` has no generated config; it keeps its own state in a per-project
+  volume (see *Antigravity* below).
 - **Images:** `-image <name>` selects one of the images bundled in
   [`images/`](images), each a `<name>.Dockerfile`. The default, `default`,
-  has opencode, git, `jq`, `ripgrep` and `curl`. Every image is a layer on an
-  internal `base` image (opencode, git, the non-root user) that isn't
-  selectable itself.
+  adds `jq`, `ripgrep`, `curl` and `gh` on top of the selected harness's base
+  (opencode for `-harness opencode`, agy for `-harness agy`). Every image is a
+  layer on an internal per-harness base image (`base-opencode`, `base-agy`;
+  each installs its agent, git and the non-root user) that isn't selectable
+  itself.
   `rnes` never pulls a sandbox image from a registry: a missing image is built
   from its Dockerfile (a build failure is an error). `-build` rebuilds the
   images from scratch, ignoring docker's layer cache, so it also picks up new
-  apt package versions and a newer `@opencode/cli`; without it, an existing image
-  is reused indefinitely. `-sandbox-update` is the same rebuild, but of every bundled
-  image (or only `-image`'s, if given), and it exits instead of running a
-  session (it implies `-sandbox` and `-build`).
+  apt package versions and a newer agent; without it, an existing image
+  is reused indefinitely. `-sandbox-update` is the same rebuild, but of every
+  harness's images (or only `-harness`'s, and only `-image`'s when given), and
+  it exits instead of running a session (it implies `-sandbox` and `-build`).
   Images are tagged `rnes-sandbox-<name>:<hash>` from the Dockerfile's contents
   (and that of the base), so a changed Dockerfile builds a new image and an
   unchanged one is reused. Note the build itself still fetches the
-  `node:22-slim` base image, apt packages and the `@opencode/cli` npm package; to
-  control that, review or pin them in the Dockerfiles. Old tags are not
+  `node:22-slim` or `debian:bookworm-slim` base image, apt packages and the
+  agent installer; to control that, review or pin them in the Dockerfiles. Old
+  tags are not
   removed automatically; list them with `docker images 'rnes-sandbox-*'` and
   delete the ones you no longer need with `docker rmi`.
-  - **Adding an image:** add `images/<name>.Dockerfile` as a layer on the
-    base: declare `ARG RNES_BASE`, make the final stage `FROM ${RNES_BASE}` (rnes
+  - **Adding an image:** add `images/<name>.Dockerfile` as a layer on a base:
+    declare `ARG RNES_BASE`, make the final stage `FROM ${RNES_BASE}` (rnes
     passes the built base image as that build arg), and end with `USER rnes`,
     after a `USER root` for installs. A test checks every bundled Dockerfile
     against this. Dockerfiles are built without a build context, so they can't
     `COPY` local files.
+  - **Adding a harness:** add `images/base-<harness>.Dockerfile` (standalone,
+    ending as `USER rnes` with the agent as `ENTRYPOINT`), then register the
+    harness in `internal/harness` as a `sandboxProfile`. The profile supplies
+    the image/base name, whether it needs a llama-server, any extra policy and
+    its argument list; the rest (proxy, credentials, skills, `.rnes` policy
+    protection) is shared.
 - **Parallel sessions:** each session gets a uniquely named container, and
   any number can share one host llama-server (same lifecycle rules as above).
 - **Network exposure:** `rnes` never listens on all interfaces by default. With
@@ -161,11 +194,17 @@ Only `docker` is needed on the host (not opencode).
   - *Per-project policy (`.rnes/policy.txt`):* run `rnes -generate-policy` in a
     project to write a starter `.rnes/policy.txt` (it refuses to overwrite an
     existing file). When `.rnes/policy.txt` is present, `-sandbox` uses it
-    instead of the built-in defaults (still adding the session's llama-server,
-    and `openrouter.ai:443` when `RNES_OPENROUTER_API_KEY` is set) and prints
-    the active allow-list at startup; an empty `.rnes/policy.txt` restricts the
-    sandbox to llama-server alone. Wildcard `*` is not permitted in
-    `.rnes/policy.txt` (use `-all-net` on the command line instead). Every
+    instead of the built-in defaults (still adding the session's llama-server
+    for model-server harnesses, `openrouter.ai:443` when
+    `RNES_OPENROUTER_API_KEY` is set, and a cloud harness's own endpoints) and
+    prints the active allow-list at startup, marking entries that skip TLS
+    interception with `(no-inspect)`; an empty `.rnes/policy.txt` restricts the
+    sandbox to those automatic entries alone. Wildcard `*` and `private` are not
+    permitted in `.rnes/policy.txt` (use `-all-net` on the command line
+    instead). Prefix an entry with `no-inspect` to tunnel its TLS traffic
+    untouched instead of decrypting it (needed for HTTP/2, gRPC, WebSockets or
+    certificate-pinned endpoints):
+    `no-inspect example.com:443`. Every
     `-sandbox` run ensures `<cwd>/.rnes` exists on the host (an empty directory
     is invisible to `git status`) and mounts it read-only at
     `/workspace/.rnes` (rejecting symlinks), so an agent inside the container
@@ -204,7 +243,7 @@ Only `docker` is needed on the host (not opencode).
     certificate) to a per-session docker volume, which the sandbox mounts
     read-only at `/etc/rnes-ca`. `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
     `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE` and `REQUESTS_CA_BUNDLE` point at it, so
-    opencode, git, curl and most other tools trust the proxy. The volume is
+    the agents, git, curl and most other tools trust the proxy. The volume is
     removed with the network when the session ends. Nothing about the CA is
     baked into an image.
   - *Upstream:* the proxy still verifies the real server's certificate itself.
@@ -259,11 +298,12 @@ Only `docker` is needed on the host (not opencode).
     OpenRouter model is used. The proxy log shows requests by host.
   - Requires `-sandbox` (ignored with a note otherwise) and TLS interception:
     `rnes` refuses `-no-inspect` while the variable is set.
-- Session data inside the container is discarded on exit (`--rm`).
+- Session data inside the container is discarded on exit (`--rm`), except a
+  harness's own persisted auth volume (`agy`; see *Antigravity* below).
 
 #### Skills
 
-The sandbox has no access to your home directory, so none of your opencode
+The sandbox has no access to your home directory, so none of your host
 skills (`<name>/SKILL.md` directories) are visible in it by default. `-skill`
 attaches the ones you choose; without it nothing is attached and no skills
 folder is even read.
@@ -283,8 +323,12 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
   digits separated by single hyphens, at most 64 characters); a skill
   literally named `all` can only be attached by path.
 - **Sources:** names and `all` are looked up, in this order, in each
-  `-skills-dir` (in the order given), then `~/.config/opencode/skills`,
-  `~/.agents/skills` and `~/.claude/skills`. Each folder's immediate
+  `-skills-dir` (in the order given), then the active harness's own global
+  skills folder first, followed by `~/.config/opencode/skills`,
+  `~/.gemini/config/skills`, `~/.agents/skills` and `~/.claude/skills` (so
+  under `-harness agy`, `~/.gemini/config/skills` comes first and wins
+  duplicate names for `all`; under `opencode`, its own folder does). Each
+  folder's immediate
   subdirectories are its skills. Default folders that don't exist are skipped;
   a `-skills-dir` that doesn't exist is an error. `-skills-dir` on its own
   attaches nothing.
@@ -300,25 +344,29 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
     an error.
   - An unknown name is an error naming the folders searched.
   - If the project already has a skill of the same name in `.opencode/skills`,
-    `.claude/skills` or `.agents/skills`, `rnes` warns; which one opencode uses
-    is up to opencode.
+    `.opencode/skill`, `.agent/skills`, `.claude/skills` or `.agents/skills`,
+    `rnes` warns; which one the active harness uses is up to it.
 - **Validation:** a skill is a directory with a `SKILL.md` (a regular file
   inside it), whose folder name is a valid skill name. An explicitly requested
   skill that isn't valid is an error; under `all`, invalid entries are skipped
   with a warning (plain files and hidden entries such as `.git` are ignored).
 - **In the sandbox:** each attached skill's directory is bind-mounted
-  read-only at `~/.config/opencode/skills/<name>`, where opencode finds global
-  skills. They are live (edits on the host show up in the session), and
-  nothing else from your skills folders or home directory is visible. A
+  read-only where the active harness finds global skills:
+  `~/.config/opencode/skills/<name>` for opencode, and
+  `~/.gemini/config/skills/<name>` for agy (a sibling of its auth volume,
+  never inside it). They are live (edits on the host show up in the session),
+  and nothing else from your skills folders or home directory is visible. A
   symlink inside a skill that points outside its directory is dangling in the
-  container. So that docker doesn't create `~/.config` root-owned (opencode
-  writes to `~/.config/opencode`), the container's `~/.config` is then a
-  private, per-session directory under `$TMPDIR` that rnes removes when the
-  session ends; anything an image puts in `~/.config` itself is hidden while
+  container. So that docker doesn't create the mount point's parents
+  root-owned, the harness's skills parent (`~/.config` or `~/.gemini/config`)
+  is a private, per-session directory under `$TMPDIR` that rnes removes when
+  the session ends; anything an image puts there itself is hidden while
   skills are attached or skill commands are generated (the bundled images put
-  nothing there). A session with neither keeps the image's `~/.config`.
+  nothing there). A session with neither keeps the image's own directory.
 - **Skill commands:** so a skill can be invoked explicitly, like Claude's
-  `/skill`, rnes generates a `/<name>` command per skill — on the host, for
+  `/skill`, rnes generates a `/<name>` command per skill (opencode only; `agy`
+  reads attached skills from its own skills folder directly and gets no
+  synthetic commands) — on the host, for
   the project's own skills (the working directory and each parent up to the
   repository root) and the global ones; in the sandbox, for the attached
   skills and the project's (the working directory only, which is all the
@@ -361,12 +409,62 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
 - Like the other sandbox flags, `-skill` and `-skills-dir` require `-sandbox`,
   and `-sandbox-update` ignores them with a note.
 
+### Antigravity (`-harness agy`)
+
+`rnes -sandbox -harness agy` runs the Google Antigravity CLI inside the same
+sandbox, using your Google subscription instead of a local model. It requires
+`-sandbox` (there is no host mode) and never starts or contacts
+`llama-server`:
+
+- `-host` and `-port` are rejected.
+- `-model` is forwarded as `agy --model` only when passed explicitly;
+  otherwise agy keeps its own model choice.
+- `RNES_OPENROUTER_API_KEY` is ignored with a note (that provider is an
+  opencode feature).
+- Arguments after `--` are forwarded to `agy` (e.g.
+  `rnes -sandbox -harness agy -- --version`).
+
+The `agy` binary is installed in `images/base-agy.Dockerfile` and runs as your
+uid/gid, like the rest of the sandbox.
+
+**Auth and persistence.** Your host `~/.gemini` is never mounted into the
+sandbox. Instead, each project gets its own Docker named volume,
+`rnes-auth-agy-<sha256(realpath(cwd))[:12]>` (label `rnes.auth=agy`), mounted
+at `/home/rnes/.gemini/antigravity-cli`. It holds agy's OAuth credentials,
+`settings.json` and `brain/` transcripts, and is kept across runs:
+
+- Different projects never see each other's session state or transcripts.
+- `rnes` prints the volume name at startup.
+- List them with `docker volume ls --filter label=rnes.auth`.
+- Remove one with `docker volume rm rnes-auth-agy-<hash>`; this signs that
+  project out and deletes its transcripts.
+
+**Security trade-off.** Unlike the GitHub and OpenRouter credentials, agy's
+live OAuth session is inside the sandbox, because the agent has to use it
+directly. Anything that escapes the sandbox can use that session until it
+expires or you remove the volume. The sandbox still drops all Linux
+capabilities, enables `no-new-privileges`, has no direct host route apart from
+the proxy, and mounts only the project plus (read-only) `.rnes` and attached
+skills. `-all-net` is especially risky here — a live OAuth session plus
+arbitrary public egress — so rnes prints an explicit warning when the two are
+combined.
+
+**Network.** agy's Google OAuth and Antigravity endpoints are added to the
+session's allow-list as `no-inspect` entries, so their HTTP/2 and gRPC traffic
+is tunnelled untouched instead of decrypted (some use certificate pinning).
+Hosts such as `github.com` stay TLS-intercepted, audited and
+credential-injected. A custom `.rnes/policy.txt` still applies; agy's own
+endpoints are added on top of it. If that leaves no host to intercept, the
+proxy writes the system roots alone to the sandbox's trust bundle, so real
+upstream certificates still validate.
+
 ## Notes
 
 - llama-server's own logs are written to
   `$TMPDIR/rnes-llama-server-<port>.log` rather than to the terminal, since
-  opencode's full-screen UI shares the same tty and raw log output would
+  the agent's full-screen UI shares the same tty and raw log output would
   corrupt it. The path is printed on startup.
-- Only opencode is implemented as a harness today. Adding another means
-  implementing the small `Harness` interface in `internal/harness` and
-  registering it there.
+- Two harnesses are implemented today: `opencode` (host or sandbox) and
+  `agy` (sandbox only). Adding another means registering a `sandboxProfile`
+  in `internal/harness` (or implementing the small `Harness` interface for a
+  host-mode agent) and adding its `images/base-<name>.Dockerfile`.

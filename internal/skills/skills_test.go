@@ -49,6 +49,7 @@ func (e env) skill(dir, name string) string {
 }
 
 func (e env) opencode() string { return filepath.Join(e.home, ".config", "opencode", "skills") }
+func (e env) agy() string      { return filepath.Join(e.home, ".gemini", "config", "skills") }
 func (e env) agents() string   { return filepath.Join(e.home, ".agents", "skills") }
 func (e env) claude() string   { return filepath.Join(e.home, ".claude", "skills") }
 
@@ -85,6 +86,7 @@ func TestNameResolvesInSourceOrder(t *testing.T) {
 		source func(env) string
 	}{
 		{"opencode", env.opencode},
+		{"agy", env.agy},
 		{"agents", env.agents},
 		{"claude", env.claude},
 	} {
@@ -457,5 +459,27 @@ func TestSummary(t *testing.T) {
 	got := Summary([]Skill{{Name: "a", Source: "/s1"}, {Name: "b", Source: "/s2"}})
 	if got != "a (/s1), b (/s2)" {
 		t.Errorf("Summary = %q", got)
+	}
+}
+
+func TestAllPrefersActiveHarnessGlobalSkillsFolder(t *testing.T) {
+	e := newEnv(t)
+	oc := e.skill(e.opencode(), "shared")
+	ag := e.skill(e.agy(), "shared")
+
+	got, warns, err := Resolve(Request{Values: []string{"all"}, Home: e.home, Cwd: e.cwd, Harness: "opencode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Dir != oc || len(warns) != 1 || !strings.Contains(warns[0], ag) {
+		t.Errorf("opencode: got %+v, warns %q", got, warns)
+	}
+
+	got, warns, err = Resolve(Request{Values: []string{"all"}, Home: e.home, Cwd: e.cwd, Harness: "agy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Dir != ag || len(warns) != 1 || !strings.Contains(warns[0], oc) {
+		t.Errorf("agy: got %+v, warns %q", got, warns)
 	}
 }

@@ -18,6 +18,7 @@ import (
 // on its own.
 type Opencode struct {
 	configPath string
+	args       []string
 }
 
 func newOpencode(opts Options) (Harness, error) {
@@ -29,7 +30,24 @@ func newOpencode(opts Options) (Harness, error) {
 	if opts.Sandbox {
 		return newSandbox(opts, configPath), nil
 	}
-	return Opencode{configPath: configPath}, nil
+	return Opencode{configPath: configPath, args: opts.Args}, nil
+}
+
+func opencodeProfile(hostConfig string) sandboxProfile {
+	return sandboxProfile{
+		harness:               "opencode",
+		needsModelServer:      true,
+		usesGeneratedConfig:   true,
+		hostConfig:            hostConfig,
+		openRouterEnv:         "OPENROUTER_API_KEY",
+		skillsConfigHome:      containerConfigHome,
+		skillsRelDir:          "opencode/skills",
+		generateSkillCommands: true,
+		containerArgs: func(_ string, _ bool, extraArgs []string) []string {
+			// The model comes from the generated config's "model" default.
+			return append([]string{"."}, extraArgs...)
+		},
+	}
 }
 
 // opencodeProvider builds the provider block that points opencode at a
@@ -111,7 +129,7 @@ func (o Opencode) Run(dir, providerKey, modelID string) error {
 // nothing.
 func (o Opencode) launch(dir string) ([]string, []string) {
 	env := append(os.Environ(), "OPENCODE_CONFIG="+o.configPath)
-	plain := []string{"."}
+	plain := append([]string{"."}, o.args...)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rnes: warning: no skill commands: resolving home directory: %v\n", err)
@@ -150,7 +168,7 @@ func (o Opencode) launch(dir string) ([]string, []string) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "rnes: skill commands: /%s\n", strings.Join(names, ", /"))
-	return []string{"--standalone", "."}, withEnv(env, inlineConfigEnv, content)
+	return append([]string{"--standalone", "."}, o.args...), withEnv(env, inlineConfigEnv, content)
 }
 
 // globalDir is the opencode config directory holding the user's global

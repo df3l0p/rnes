@@ -31,10 +31,14 @@ const maxNameLen = 64
 // separated by single hyphens.
 var namePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
-// projectDirs are where opencode looks for a project's own skills, relative to
-// the working directory. .opencode/skill is the legacy singular form, which
-// opencode v2 still reads.
-var projectDirs = []string{".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"}
+// projectDirs are where supported harnesses look for a project's own skills,
+// relative to the working directory. .opencode/skill is opencode's legacy
+// singular form; .agent/skills is agy's workspace skills directory.
+var projectDirs = []string{".opencode/skills", ".opencode/skill", ".agent/skills", ".claude/skills", ".agents/skills"}
+
+// opencodeProjectDirs are the subset of projectDirs that opencode itself reads
+// (used by DiscoverProject and DiscoverAll when generating opencode commands).
+var opencodeProjectDirs = []string{".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"}
 
 // Skill is one skill to attach.
 type Skill struct {
@@ -60,16 +64,30 @@ type Request struct {
 	// Cwd is the working directory: relative paths are resolved against it,
 	// and it is checked for project skills of the same name.
 	Cwd string
+	// Harness names the active harness (e.g. "opencode", "agy"), putting its
+	// own global skills folder first in DefaultSourcesFor; empty defaults to
+	// "opencode".
+	Harness string
 }
 
 // DefaultSources are the host folders searched after any -skills-dir, in
-// order.
+// default ("opencode") order.
 func DefaultSources(home string) []string {
-	return []string{
-		filepath.Join(home, ".config", "opencode", "skills"),
-		filepath.Join(home, ".agents", "skills"),
-		filepath.Join(home, ".claude", "skills"),
+	return DefaultSourcesFor(home, "")
+}
+
+// DefaultSourcesFor returns the host folders searched after any -skills-dir,
+// ordering the active harness's own global skills folder first so -skill all
+// prefers it over other harnesses' folders.
+func DefaultSourcesFor(home, harness string) []string {
+	opencode := filepath.Join(home, ".config", "opencode", "skills")
+	agy := filepath.Join(home, ".gemini", "config", "skills")
+	agents := filepath.Join(home, ".agents", "skills")
+	claude := filepath.Join(home, ".claude", "skills")
+	if harness == "agy" {
+		return []string{agy, opencode, agents, claude}
 	}
+	return []string{opencode, agy, agents, claude}
 }
 
 // ValidName reports whether name is a valid skill name.
@@ -97,7 +115,7 @@ func Resolve(req Request) ([]Skill, []string, error) {
 		return nil, nil, nil
 	}
 
-	r := resolver{sources: sources, chosen: map[string]Skill{}}
+	r := resolver{sources: sources, harness: req.Harness, chosen: map[string]Skill{}}
 	all := false
 	for _, v := range req.Values {
 		switch {
@@ -136,12 +154,16 @@ func Resolve(req Request) ([]Skill, []string, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
+	agent := req.Harness
+	if agent == "" {
+		agent = "opencode"
+	}
 	warnings := r.warnings
 	for _, s := range out {
 		for _, d := range projectDirs {
 			p := filepath.Join(req.Cwd, d, s.Name)
 			if _, err := os.Lstat(p); err == nil {
-				warnings = append(warnings, fmt.Sprintf("skill %q is attached from %s, but this project also has %s; which one opencode uses is up to opencode", s.Name, s.Path, filepath.Join(d, s.Name)))
+				warnings = append(warnings, fmt.Sprintf("skill %q is attached from %s, but this project also has %s; which one %s uses is up to %s", s.Name, s.Path, filepath.Join(d, s.Name), agent, agent))
 			}
 		}
 	}
@@ -218,7 +240,7 @@ func sources(req Request) ([]string, error) {
 	if len(req.Values) == 0 {
 		return out, nil
 	}
-	for _, d := range DefaultSources(req.Home) {
+	for _, d := range DefaultSourcesFor(req.Home, req.Harness) {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
 			add(d)
 		}
@@ -245,6 +267,7 @@ func expand(p string, req Request) (string, error) {
 
 type resolver struct {
 	sources  []string
+	harness  string
 	chosen   map[string]Skill
 	warnings []string
 }
@@ -319,7 +342,7 @@ func (r *resolver) byName(name string) (Skill, error) {
 	case invalid != nil:
 		return Skill{}, invalid
 	case len(r.sources) == 0:
-		return Skill{}, fmt.Errorf("skill %q not found: no skills folder exists (searched for %s)", name, strings.Join(DefaultSources("~"), ", "))
+		return Skill{}, fmt.Errorf("skill %q not found: no skills folder exists (searched for %s)", name, strings.Join(DefaultSourcesFor("~", r.harness), ", "))
 	default:
 		return Skill{}, fmt.Errorf("skill %q not found (searched %s)", name, strings.Join(r.sources, ", "))
 	}
@@ -403,7 +426,7 @@ func DiscoverAll(home, cwd string) []Skill {
 func projectSources(cwd string, walk bool) []string {
 	var out []string
 	for _, dir := range projectLevels(cwd, walk) {
-		for _, d := range projectDirs {
+		for _, d := range opencodeProjectDirs {
 			p := filepath.Join(dir, d)
 			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 				out = append(out, p)

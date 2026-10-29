@@ -3,9 +3,12 @@
 # One host:port per line; '#' starts a comment. Everything else is blocked
 # (403 from rnes-proxy). This session's llama-server (and any configured
 # cloud model provider) are added automatically.
-# Wildcard '*' is not allowed in .rnes/policy.txt; pass -all-net on the command
-# line instead. Remove all entries below to restrict the sandbox to llama-server
-# only.
+# Prefix an entry with 'no-inspect ' (e.g. 'no-inspect example.com:443') to
+# pass its TLS traffic through unread instead of decrypting it (needed for
+# HTTP/2, gRPC, WebSockets, or certificate-pinned endpoints).
+# Wildcard '*' and 'private' are not allowed in .rnes/policy.txt; pass -all-net
+# on the command line instead. Remove all entries below to restrict the sandbox
+# to its model provider only.
 
 # npm packages
 registry.npmjs.org:443

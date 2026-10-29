@@ -27,14 +27,22 @@ const providerKey = "llama-cpp"
 // globals or ad-hoc locals in run()) so flag parsing stays in one place and
 // run() takes a plain value.
 type cliConfig struct {
-	model   string
-	host    string
-	hostSet bool // -host was passed explicitly, even if equal to the default
-	port    int
-	harness string
-	sandbox bool
-	image   string
-	build   bool
+	model    string
+	modelSet bool // -model was passed explicitly, even if equal to the default
+	host     string
+	hostSet  bool // -host was passed explicitly, even if equal to the default
+	port     int
+	portSet  bool // -port was passed explicitly, even if equal to the default
+	harness  string
+	// harnessSet reports whether -harness was passed explicitly (used by
+	// -sandbox-update to scope a rebuild to one harness instead of all of them).
+	harnessSet bool
+	sandbox    bool
+	image      string
+	build      bool
+	// args are the trailing command-line arguments after "--", forwarded to
+	// the harness executable.
+	args []string
 	// sandboxUpdate rebuilds the sandbox images and exits without running the
 	// agent. applyImplications turns it into sandbox and build.
 	sandboxUpdate bool
@@ -85,7 +93,7 @@ func (c cliConfig) validate() error {
 			return fmt.Errorf("RNES_GITHUB_TOKEN is set, but -no-inspect stops the proxy from decrypting HTTPS, so it couldn't inject the token; unset one of them")
 		}
 	}
-	if c.openrouterKey != "" {
+	if c.openrouterKey != "" && !c.ignoresOpenRouterKey() {
 		if err := proxy.ValidateToken(c.openrouterKey); err != nil {
 			return fmt.Errorf("RNES_OPENROUTER_API_KEY is unusable: %w", err)
 		}
@@ -94,6 +102,74 @@ func (c cliConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+// ignoresOpenRouterKey reports whether the selected harness never uses the
+// OpenRouter provider, so RNES_OPENROUTER_API_KEY is dropped with a note (see
+// run) even when it would otherwise be rejected as unusable or at odds with
+// -no-inspect.
+func (c cliConfig) ignoresOpenRouterKey() bool {
+	if !c.sandbox {
+		return false
+	}
+	needsModelServer, err := harness.NeedsModelServerName(c.harness)
+	return err == nil && !needsModelServer
+}
+
+// checkModelServerFlags rejects an explicit -host or -port when the selected
+// harness doesn't run against a local llama-server.
+func checkModelServerFlags(c cliConfig, needsModelServer bool) error {
+	if needsModelServer {
+		return nil
+	}
+	var given []string
+	if c.hostSet {
+		given = append(given, "-host")
+	}
+	if c.portSet {
+		given = append(given, "-port")
+	}
+	if len(given) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s cannot be used with -harness %s (it doesn't use llama-server)", strings.Join(given, " and "), c.harness)
+}
+
+// harnessOptions turns the parsed flags into the harness's Options.
+func harnessOptions(c cliConfig, attached []skills.Skill, policy []byte) harness.Options {
+	return harness.Options{
+		Sandbox:       c.sandbox,
+		Image:         c.image,
+		Build:         c.build,
+		AllNet:        c.allNet,
+		NoInspect:     c.noInspect,
+		GitHubToken:   c.githubToken,
+		OpenRouterKey: c.openrouterKey,
+		Skills:        attached,
+		Policy:        policy,
+		ModelSet:      c.modelSet,
+		Args:          c.args,
+	}
+}
+
+// rebuildAllHarnesses reports whether -sandbox-update should rebuild every
+// harness's images: only when -harness wasn't given, since an explicit
+// -harness scopes the rebuild to that harness.
+func rebuildAllHarnesses(c cliConfig) bool {
+	return c.sandboxUpdate && !c.harnessSet
+}
+
+// runHarness launches h in the foreground. The agent shares rnes's foreground
+// process group, so Ctrl+C reaches both; notifying (and not reacting) keeps
+// rnes alive to run its cleanup (stopping llama-server, tearing down the
+// sandbox's proxy and container) once the agent exits.
+func runHarness(h harness.Harness, dir, providerKey, model string) error {
+	sigCh := make(chan os.Signal, 1)
+	// SIGHUP (terminal closed) is included for the same reason, so cleanup
+	// still runs once the agent exits.
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	return h.Run(dir, providerKey, model)
 }
 
 // applyImplications derives flags implied by others: -sandbox-update is a
@@ -120,18 +196,26 @@ Environment:
                         export RNES_GITHUB_TOKEN=$(gh auth token)
   RNES_OPENROUTER_API_KEY
                       OpenRouter API key the sandbox's proxy injects at openrouter.ai
-                      (requires -sandbox). The sandbox only ever holds a placeholder,
-                      but an agent in it can still make OpenRouter calls, so use a
-                      dedicated key with a low credit limit. Local llama stays the
-                      default; switch to an openrouter model inside opencode. Prompts
-                      and code context leave your machine when you do.
+                      (requires -sandbox; ignored with -harness agy). The sandbox only
+                      ever holds a placeholder, but an agent in it can still make
+                      OpenRouter calls, so use a dedicated key with a low credit limit.
+                      Local llama stays the default; switch to an openrouter model
+                      inside opencode. Prompts and code context leave your machine when
+                      you do.
+`
+
+// trailingArgsHelp documents the "--" passthrough.
+const trailingArgsHelp = `
+Arguments after "--" are forwarded to the harness executable, e.g.
+  rnes -sandbox -harness agy -- --version
 `
 
 // usage is flag.Usage: the flag defaults followed by the environment.
 func usage(w io.Writer) {
-	fmt.Fprintf(w, "Usage of %s:\n", os.Args[0])
+	fmt.Fprintf(w, "Usage of %s: [flags] [-- harness-args...]\n", os.Args[0])
 	flag.CommandLine.SetOutput(w)
 	flag.PrintDefaults()
+	fmt.Fprint(w, trailingArgsHelp)
 	fmt.Fprint(w, envHelp)
 }
 
@@ -179,7 +263,7 @@ func resolveSkills(c cliConfig, home, cwd string, stderr io.Writer) ([]skills.Sk
 	if len(c.skills) == 0 && len(c.skillsDirs) == 0 {
 		return nil, nil
 	}
-	attached, warnings, err := skills.Resolve(skills.Request{Values: c.skills, Dirs: c.skillsDirs, Home: home, Cwd: cwd})
+	attached, warnings, err := skills.Resolve(skills.Request{Values: c.skills, Dirs: c.skillsDirs, Home: home, Cwd: cwd, Harness: c.harness})
 	if err != nil {
 		return nil, err
 	}
@@ -216,9 +300,20 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	}
 	hosts := pol.SortedAllow()
 	if len(hosts) == 0 {
-		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): none (model server only)\n", harness.ProjectPolicyRel)
+		scope := "model server only"
+		if needs, err := harness.NeedsModelServerName(c.harness); err == nil && !needs {
+			scope = "harness endpoints only"
+		}
+		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): none (%s)\n", harness.ProjectPolicyRel, scope)
 	} else {
-		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(hosts, ", "))
+		shown := make([]string, len(hosts))
+		for i, hp := range hosts {
+			if pol.SkipsInspect(hp) {
+				hp += " (no-inspect)"
+			}
+			shown[i] = hp
+		}
+		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(shown, ", "))
 	}
 	return raw, nil
 }
@@ -272,26 +367,34 @@ func listenHost(h harness.Harness, host string, hostSet bool) (string, error) {
 
 func parseFlags() (cliConfig, error) {
 	var cfg cliConfig
-	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available")
-	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux)")
-	flag.IntVar(&cfg.port, "port", 8080, "llama-server port")
-	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: opencode)")
+	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given")
+	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux; rejected for harnesses that don't use llama-server)")
+	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
+	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")
 	flag.BoolVar(&cfg.sandbox, "sandbox", false, "run the harness in a Docker container that mounts the current directory")
 	flag.StringVar(&cfg.image, "image", "", "bundled sandbox image to use (default "+images.Default+"; available: "+strings.Join(images.Names(), ", ")+"); requires -sandbox")
 	flag.BoolVar(&cfg.build, "build", false, "rebuild the sandbox image from scratch, without docker's layer cache, even if it exists (it is built when missing, never pulled); requires -sandbox")
-	flag.BoolVar(&cfg.sandboxUpdate, "sandbox-update", false, "rebuild the sandbox images (every bundled one, or just -image if given; plus the base and the proxy image) from scratch, without docker's layer cache, so it picks up new apt packages and a newer @opencode/cli, then exit without running the agent; implies -sandbox")
+	flag.BoolVar(&cfg.sandboxUpdate, "sandbox-update", false, "rebuild the sandbox images (every bundled one for every harness, unless -harness selects one or -image selects an image; plus each base and the proxy image) from scratch, without docker's layer cache, so it picks up new packages and a newer agent, then exit without running the agent; implies -sandbox")
 	flag.BoolVar(&cfg.generatePolicy, "generate-policy", false, "write a starter .rnes/policy.txt in the current directory for -sandbox and exit without running the agent")
 	flag.BoolVar(&cfg.allNet, "all-net", false, "let the sandbox reach any public host over http(s), not just the default allow-list (your machine and LAN stay blocked apart from llama-server); requires -sandbox")
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
-	flag.Var(&cfg.skills, "skill", "attach a host opencode skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then ~/.config/opencode/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
+	flag.Var(&cfg.skills, "skill", "attach a host skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then the active harness's global skills folder, ~/.gemini/config/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
 	flag.Var(&cfg.skillsDirs, "skills-dir", "a host folder whose subdirectories are skills, searched before the default ones for -skill names and \"all\"; attaches nothing on its own; repeatable; requires -sandbox")
 	flag.Usage = func() { usage(os.Stderr) }
 	flag.Parse()
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "host" {
+		switch f.Name {
+		case "model":
+			cfg.modelSet = true
+		case "host":
 			cfg.hostSet = true
+		case "port":
+			cfg.portSet = true
+		case "harness":
+			cfg.harnessSet = true
 		}
 	})
+	cfg.args = flag.Args()
 	cfg.applyImplications()
 	cfg.dropSkillsForUpdate()
 	cfg.githubToken = cfg.sessionCredential("RNES_GITHUB_TOKEN", githubTokenFromEnv())
@@ -327,6 +430,24 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "rnes: wrote %s\n", harness.ProjectPolicyRel)
 		return nil
 	}
+	// A harness backed by its own cloud/subscription service (agy) doesn't use
+	// llama-server: reject -host/-port and drop an OpenRouter key before
+	// resolving skills, so nothing downstream sees credentials or flags that
+	// only a model-server session would use. Without -sandbox the harness is
+	// constructed below and reports its own error (e.g. agy requires it).
+	if cfg.sandbox {
+		needsModelServer, err := harness.NeedsModelServerName(cfg.harness)
+		if err != nil {
+			return err
+		}
+		if err := checkModelServerFlags(cfg, needsModelServer); err != nil {
+			return err
+		}
+		if !needsModelServer && cfg.openrouterKey != "" {
+			fmt.Fprintf(os.Stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
+			cfg.openrouterKey = ""
+		}
+	}
 	// Before anything starts, so a bad -skill or .rnes/policy.txt fails with
 	// no server or container left behind.
 	attached, err := resolveSkills(cfg, home, cwd, os.Stderr)
@@ -338,9 +459,15 @@ func run() error {
 		return err
 	}
 
-	h, err := harness.New(cfg.harness, harness.Options{Sandbox: cfg.sandbox, Image: cfg.image, Build: cfg.build, AllNet: cfg.allNet, NoInspect: cfg.noInspect, GitHubToken: cfg.githubToken, OpenRouterKey: cfg.openrouterKey, Skills: attached, Policy: policyBytes})
+	h, err := harness.New(cfg.harness, harnessOptions(cfg, attached, policyBytes))
 	if err != nil {
 		return err
+	}
+	if vol := harness.AuthVolume(h, cwd); vol != "" && !cfg.sandboxUpdate {
+		fmt.Fprintf(os.Stderr, "rnes: %s auth: persisted for this project in Docker volume %s (live OAuth inside the sandbox; list with 'docker volume ls --filter label=rnes.auth', remove with 'docker volume rm %s')\n", cfg.harness, vol, vol)
+		if cfg.allNet {
+			fmt.Fprintf(os.Stderr, "rnes: warning: -all-net lets the sandbox reach any public host while holding your live %s OAuth session in %s\n", cfg.harness, vol)
+		}
 	}
 	if cfg.githubToken != "" {
 		fmt.Fprintln(os.Stderr, "rnes: GitHub token: the sandbox proxy injects it at github.com and api.github.com; the sandbox only holds a placeholder (use a fine-grained token scoped to what the agent needs)")
@@ -361,10 +488,14 @@ func run() error {
 		return err
 	}
 	// Before starting any server, so a failed image pull/build leaves nothing
-	// running.
-	// -sandbox-update without -image refreshes every bundled image, not just
-	// the default.
-	if a, ok := h.(harness.AllPreparer); ok && cfg.sandboxUpdate && cfg.image == "" {
+	// running. -sandbox-update without -harness refreshes every harness's
+	// images; with -harness it scopes the rebuild to that harness (and, when
+	// -image is omitted, to every image on its base).
+	if rebuildAllHarnesses(cfg) {
+		if err := harness.PrepareAllHarnesses(harness.Options{Image: cfg.image, Build: cfg.build}); err != nil {
+			return err
+		}
+	} else if a, ok := h.(harness.AllPreparer); ok && cfg.sandboxUpdate && cfg.image == "" {
 		if err := a.PrepareAll(); err != nil {
 			return err
 		}
@@ -378,6 +509,13 @@ func run() error {
 	if cfg.sandboxUpdate {
 		fmt.Fprintln(os.Stderr, "rnes: sandbox images are up to date")
 		return nil
+	}
+
+	// A harness backed by its own cloud/subscription service (agy) has no
+	// llama-server to start or point at one: run it directly. cfg.model is
+	// forwarded only when -model was explicit (Options.ModelSet).
+	if !harness.NeedsModelServer(h) {
+		return runHarness(h, cwd, providerKey, cfg.model)
 	}
 
 	// rnes talks to the server on the address it listens on: a server bound to a
@@ -466,21 +604,10 @@ func run() error {
 	}
 
 	if err := h.Configure(providerKey, baseURL, modelIDs); err != nil {
-		return fmt.Errorf("updating opencode config: %w", err)
+		return fmt.Errorf("configuring the harness: %w", err)
 	}
 
-	// opencode shares rnes's foreground process group, so Ctrl+C delivers
-	// SIGINT to both. Without this, Go's default disposition kills rnes
-	// immediately, skipping the llama-server cleanup below. Notifying (and
-	// not reacting to) the signal here just stops rnes from dying on its own;
-	// opencode still receives and handles the signal directly.
-	sigCh := make(chan os.Signal, 1)
-	// SIGHUP (terminal closed) is included for the same reason, so cleanup
-	// still runs once opencode exits.
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
-
-	runErr := h.Run(cwd, providerKey, model)
+	runErr := runHarness(h, cwd, providerKey, model)
 
 	// The last rnes session out stops an rnes-started server, even if a different
 	// session started it. Servers rnes didn't start have no record and are left

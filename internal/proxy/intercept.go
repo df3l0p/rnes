@@ -29,10 +29,10 @@ func (s *Server) logf(format string, args ...any) {
 
 // interceptable reports whether a CONNECT to target is terminated here rather
 // than tunnelled blind: a CA is configured, the policy lists the target
-// explicitly (hosts allowed only by AnyPublic are never intercepted), and the
-// CA covers its host.
+// explicitly without no-inspect (hosts allowed only by AnyPublic or marked
+// no-inspect are never intercepted), and the CA covers its host.
 func (s *Server) interceptable(target string) bool {
-	if s.CA == nil || !s.Policy.Explicit(target) {
+	if s.CA == nil || !s.Policy.Explicit(target) || s.Policy.SkipsInspect(target) {
 		return false
 	}
 	host, _, err := net.SplitHostPort(target)

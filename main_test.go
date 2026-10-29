@@ -172,6 +172,25 @@ func TestValidateRejectsAnUnusableOpenRouterKey(t *testing.T) {
 	}
 }
 
+func TestValidateIgnoresTheOpenRouterKeyForACloudHarness(t *testing.T) {
+	// agy never uses the OpenRouter provider, so even an unusable key or one
+	// combined with -no-inspect must not block the session (it is dropped with
+	// a note at startup).
+	for _, cfg := range []cliConfig{
+		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "agy", noInspect: true, openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x\n"},
+	} {
+		if err := cfg.validate(); err != nil {
+			t.Errorf("validate(%+v) = %v, want nil", cfg, err)
+		}
+	}
+	// A model-server harness still validates it.
+	if err := (cliConfig{sandbox: true, harness: "opencode", noInspect: true, openrouterKey: "sk-or-x"}).validate(); err == nil {
+		t.Error("opencode with -no-inspect and an OpenRouter key must still be rejected")
+	}
+}
+
 func TestActiveProvidersListsOnlyTheSetOnes(t *testing.T) {
 	if got := activeProviders(cliConfig{}); len(got) != 0 {
 		t.Errorf("none set: %v", got)
@@ -342,5 +361,121 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	raw, err = resolvePolicy(cliConfig{sandbox: true}, cwd, &buf)
 	if err != nil || raw == nil || !strings.Contains(buf.String(), "none (model server only)") {
 		t.Errorf("empty policy = (rawNil=%v, err=%v, out=%q)", raw == nil, err, buf.String())
+	}
+
+	// A cloud harness has no model server to add, so the empty-policy line
+	// describes its own endpoints instead.
+	buf.Reset()
+	if _, err := resolvePolicy(cliConfig{sandbox: true, harness: "agy"}, cwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "none (harness endpoints only)") {
+		t.Errorf("empty agy policy line = %q, want none (harness endpoints only)", buf.String())
+	}
+
+	// no-inspect entries are marked in the startup line.
+	buf.Reset()
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("no-inspect example.com:443\ngithub.com:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "example.com:443 (no-inspect)") || !strings.Contains(buf.String(), "github.com:443") {
+		t.Errorf("startup line = %q, want example.com:443 (no-inspect) and plain github.com:443", buf.String())
+	}
+}
+
+func TestCheckModelServerFlagsRejectsHostAndPortForCloudHarnesses(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		cfg              cliConfig
+		needsModelServer bool
+		want             string
+	}{
+		{"model server accepts -host and -port", cliConfig{harness: "opencode", hostSet: true, portSet: true}, true, ""},
+		{"cloud harness accepts neither flag being set", cliConfig{harness: "agy"}, false, ""},
+		{"cloud harness rejects -host", cliConfig{harness: "agy", hostSet: true}, false, "-host cannot be used with -harness agy"},
+		{"cloud harness rejects -port", cliConfig{harness: "agy", portSet: true}, false, "-port cannot be used with -harness agy"},
+		{"cloud harness rejects both", cliConfig{harness: "agy", hostSet: true, portSet: true}, false, "-host and -port cannot be used with -harness agy"},
+	} {
+		err := checkModelServerFlags(tc.cfg, tc.needsModelServer)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: err = %v, want nil", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one containing %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestHarnessOptionsCarryModelSetAndTrailingArgs(t *testing.T) {
+	cfg := cliConfig{
+		sandbox:  true,
+		modelSet: true,
+		args:     []string{"--continue", "--mode", "plan"},
+	}
+	opts := harnessOptions(cfg, nil, nil)
+	if !opts.ModelSet || strings.Join(opts.Args, " ") != "--continue --mode plan" {
+		t.Errorf("options = ModelSet=%v Args=%v, want true and the trailing args", opts.ModelSet, opts.Args)
+	}
+	if !opts.Sandbox {
+		t.Error("Sandbox was not carried over")
+	}
+	if plain := harnessOptions(cliConfig{}, nil, nil); plain.ModelSet || len(plain.Args) != 0 {
+		t.Errorf("default options = ModelSet=%v Args=%v, want false and none", plain.ModelSet, plain.Args)
+	}
+}
+
+func TestRebuildAllHarnessesOnlyWithoutExplicitHarness(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  cliConfig
+		want bool
+	}{
+		{"not updating", cliConfig{}, false},
+		{"update without -harness rebuilds all", cliConfig{sandboxUpdate: true}, true},
+		{"update with -harness is scoped", cliConfig{sandboxUpdate: true, harnessSet: true}, false},
+	} {
+		if got := rebuildAllHarnesses(tc.cfg); got != tc.want {
+			t.Errorf("%s: rebuildAllHarnesses = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestResolveSkillsPrefersTheActiveHarnessGlobalFolder(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	agyDir := filepath.Join(home, ".gemini", "config", "skills", "shared")
+	ocDir := filepath.Join(home, ".config", "opencode", "skills", "shared")
+	for _, d := range []string{agyDir, ocDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("---\nname: shared\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		harness string
+		want    string
+	}{
+		{"agy", filepath.Join(".gemini", "config", "skills", "shared")},
+		{"opencode", filepath.Join(".config", "opencode", "skills", "shared")},
+	} {
+		var buf bytes.Buffer
+		got, err := resolveSkills(cliConfig{sandbox: true, harness: tc.harness, skills: stringList{"all"}}, home, cwd, &buf)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("%s: got %v, %v", tc.harness, got, err)
+		}
+		if !strings.Contains(got[0].Dir, tc.want) {
+			t.Errorf("%s: attached %q, want the %s copy", tc.harness, got[0].Dir, tc.want)
+		}
+		if !strings.Contains(buf.String(), "shadowing") {
+			t.Errorf("%s: output = %q, want a shadowing warning", tc.harness, buf.String())
+		}
 	}
 }
