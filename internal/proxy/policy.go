@@ -12,6 +12,7 @@ import (
 )
 
 // ParsePolicy reads a Policy in its text form: one "host:port" per line,
+// "no-inspect host:port" for an entry that bypasses TLS interception,
 // "private host:port" for an entry that may resolve to a non-public address
 // (such as the host's llama-server), or a lone "*" to also allow any public
 // host (Policy.AnyPublic); blank lines and everything after a '#' are
@@ -22,16 +23,16 @@ func ParsePolicy(r io.Reader) (Policy, error) {
 }
 
 // ParseUserPolicy reads a user-managed policy file (.rnes/policy.txt): one
-// explicit "host:port" per line, with '#' comments and blank lines ignored.
-// Unlike ParsePolicy, it rejects "*" (wildcard public egress is gated by the
-// -all-net CLI flag) and "private" entries (every user policy host must
-// resolve to a public address).
+// explicit "host:port" or "no-inspect host:port" per line, with '#' comments
+// and blank lines ignored. Unlike ParsePolicy, it rejects "*" (wildcard public
+// egress is gated by the -all-net CLI flag) and "private" entries (every user
+// policy host must resolve to a public address).
 func ParseUserPolicy(r io.Reader) (Policy, error) {
 	return parsePolicy(r, false)
 }
 
 func parsePolicy(r io.Reader, internal bool) (Policy, error) {
-	var hostports, privates []string
+	var hostports, privates, noInspects []string
 	anyPublic := false
 	sc := bufio.NewScanner(r)
 	for n := 1; sc.Scan(); n++ {
@@ -59,6 +60,15 @@ func parsePolicy(r io.Reader, internal bool) (Policy, error) {
 			privates = append(privates, hp)
 			continue
 		}
+		if rest, ok := strings.CutPrefix(line, "no-inspect "); ok {
+			hp := strings.TrimSpace(rest)
+			if err := validateHostPort(hp); err != nil {
+				return Policy{}, fmt.Errorf("line %d: %w", n, err)
+			}
+			hostports = append(hostports, hp)
+			noInspects = append(noInspects, hp)
+			continue
+		}
 		if err := validateHostPort(line); err != nil {
 			return Policy{}, fmt.Errorf("line %d: %w", n, err)
 		}
@@ -70,6 +80,9 @@ func parsePolicy(r io.Reader, internal bool) (Policy, error) {
 	pol := NewPolicy(hostports)
 	for _, hp := range privates {
 		pol.AllowPrivate(hp)
+	}
+	for _, hp := range noInspects {
+		pol.AllowNoInspect(hp)
 	}
 	pol.AnyPublic = anyPublic
 	return pol, nil
@@ -97,12 +110,16 @@ func (p Policy) SortedAllow() []string {
 }
 
 // DNSHosts lists, sorted and without duplicates, the host names in the policy's
-// explicit entries, ignoring ports and IP literals. These are the hosts an
-// interception CA can be constrained to.
+// explicit entries that are subject to TLS interception, ignoring ports, IP
+// literals, and no-inspect entries. These are the hosts an interception CA can
+// be constrained to.
 func (p Policy) DNSHosts() []string {
 	seen := map[string]bool{}
 	var hosts []string
 	for hp := range p.Allow {
+		if p.SkipsInspect(hp) {
+			continue
+		}
 		host, _, err := net.SplitHostPort(hp)
 		if err != nil || net.ParseIP(host) != nil || seen[host] {
 			continue

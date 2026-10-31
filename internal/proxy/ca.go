@@ -132,6 +132,39 @@ func (c *CA) Bundle(systemRoots string) ([]byte, error) {
 	return append(roots, c.certPEM...), nil
 }
 
+// TrustBundle decides what TLS trust a sandbox gets for pol, together with the
+// session CA (if any) that enforces it. With at least one interceptable host
+// (the policy's explicit, non-no-inspect DNS names) it returns a session CA
+// constrained to them and the bundle of the system roots plus that CA's
+// certificate. Otherwise — every allowed host marked no-inspect, or only IP
+// literals listed — it returns a nil CA and the system roots alone as the
+// bundle, so the sandbox's SSL_CERT_FILE still validates real upstream
+// certificates. A nil CA with a bundle is the no-interception case, not an
+// error.
+func TrustBundle(pol Policy, systemRoots string) (*CA, []byte, error) {
+	hosts := pol.DNSHosts()
+	if len(hosts) > 0 {
+		ca, err := NewCA(hosts)
+		if err != nil {
+			return nil, nil, err
+		}
+		bundle, err := ca.Bundle(systemRoots)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ca, bundle, nil
+	}
+	roots, err := os.ReadFile(systemRoots)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading system roots: %w", err)
+	}
+	// Same shape as CA.Bundle: a PEM file ending in a newline.
+	if len(roots) > 0 && roots[len(roots)-1] != '\n' {
+		roots = append(roots, '\n')
+	}
+	return nil, roots, nil
+}
+
 // LeafFor returns the certificate presented to a client that asked for host,
 // issuing it on first use. Only the exact hosts the CA was created for are
 // served, even though its name constraint also covers their subdomains.

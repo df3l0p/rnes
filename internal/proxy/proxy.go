@@ -43,6 +43,11 @@ type Policy struct {
 	// destination — whether in Allow or matched by AnyPublic — must resolve
 	// to a public IP (see isPublic).
 	Private map[string]bool
+	// NoInspect names the subset of Allow entries whose HTTPS connections are
+	// blind-tunnelled rather than TLS-terminated, even when a session CA is
+	// configured (for endpoints using HTTP/2, gRPC, WebSockets, or certificate
+	// pinning). They still go through publicDialer unless also in Private.
+	NoInspect map[string]bool
 	// AnyPublic also lets through any destination not in Allow, as long as
 	// the address actually dialed is public (see isPublic): the internet,
 	// but not the host machine or the LAN.
@@ -88,6 +93,28 @@ func (p *Policy) AllowPrivate(hostports ...string) {
 // non-public address.
 func (p Policy) AllowsPrivate(hostport string) bool {
 	return p.Private[strings.ToLower(hostport)]
+}
+
+// AllowNoInspect marks each hostport (and adds it to Allow) as skipping TLS
+// interception so CONNECT tunnels it untouched.
+func (p *Policy) AllowNoInspect(hostports ...string) {
+	if p.Allow == nil {
+		p.Allow = make(map[string]bool, len(hostports))
+	}
+	if p.NoInspect == nil {
+		p.NoInspect = make(map[string]bool, len(hostports))
+	}
+	for _, h := range hostports {
+		k := strings.ToLower(h)
+		p.Allow[k] = true
+		p.NoInspect[k] = true
+	}
+}
+
+// SkipsInspect reports whether hostport is configured to bypass TLS
+// interception and be blind-tunnelled instead.
+func (p Policy) SkipsInspect(hostport string) bool {
+	return p.NoInspect[strings.ToLower(hostport)]
 }
 
 // Explicit reports whether hostport is listed, as opposed to allowed only by

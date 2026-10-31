@@ -13,7 +13,11 @@ import (
 var validName = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*$`)
 
 func TestImageNamesAreValidDockerRepositoryNames(t *testing.T) {
-	for _, name := range append([]string{Base}, Names()...) {
+	bases := BaseNames()
+	if !reflect.DeepEqual(bases, []string{"base-agy", "base-opencode"}) {
+		t.Fatalf("BaseNames() = %v, want [base-agy base-opencode]", bases)
+	}
+	for _, name := range append(bases, Names()...) {
 		if !validName.MatchString(name) {
 			t.Errorf("image name %q must match %s (it becomes rnes-sandbox-%s)", name, validName, name)
 		}
@@ -61,12 +65,13 @@ func parseInstructions(src string) []instruction {
 func TestNamesListsOnlySelectableImages(t *testing.T) {
 	got := Names()
 	if !reflect.DeepEqual(got, []string{"default"}) {
-		t.Errorf("Names() = %v, want [default]: the base image is internal", got)
+		t.Errorf("Names() = %v, want [default]: the base images are internal", got)
 	}
 }
 
-func TestReadRejectsUnknownNamesPathsAndTheBase(t *testing.T) {
-	for _, name := range []string{"nope", "", Base, "../images/default", "default.Dockerfile", "sub/default"} {
+func TestReadRejectsUnknownNamesPathsAndTheBases(t *testing.T) {
+	bad := append([]string{"nope", "", "base", "../images/default", "default.Dockerfile", "sub/default"}, BaseNames()...)
+	for _, name := range bad {
 		if _, err := Read(name); err == nil {
 			t.Errorf("Read(%q) = nil error, want one", name)
 		}
@@ -77,27 +82,47 @@ func TestReadRejectsUnknownNamesPathsAndTheBase(t *testing.T) {
 }
 
 func TestReadBase(t *testing.T) {
-	raw, err := ReadBase()
+	opencodeRaw, err := ReadBase("opencode")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "FROM node:") {
-		t.Error("base must be a standalone image")
+	if !strings.Contains(string(opencodeRaw), "FROM node:") {
+		t.Error("opencode base must be a standalone node image")
+	}
+
+	agyRaw, err := ReadBase("agy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(agyRaw), "FROM debian:bookworm-slim") {
+		t.Error("agy base must be a standalone debian:bookworm-slim image")
+	}
+
+	for _, bad := range []string{"", "nope", "../default"} {
+		if _, err := ReadBase(bad); err == nil {
+			t.Errorf("ReadBase(%q) = nil error, want one", bad)
+		}
 	}
 }
 
 // TestBundledImagesFollowTheContract checks every shipped Dockerfile, since
-// rnes builds them as-is with no runtime rewriting: the base is standalone; every
-// selectable image is a layer that declares ARG RNES_BASE, starts its final stage
-// FROM ${RNES_BASE} (which rnes passes as a build arg) and hands back to user rnes.
+// rnes builds them as-is with no runtime rewriting: each base is standalone;
+// every selectable image is a layer that declares ARG RNES_BASE, starts its
+// final stage FROM ${RNES_BASE} (which rnes passes as a build arg) and hands
+// back to user rnes.
 func TestBundledImagesFollowTheContract(t *testing.T) {
-	all := append([]string{Base}, Names()...)
+	wantEntrypoints := map[string]string{
+		"base-opencode": `ENTRYPOINT ["opencode"]`,
+		"base-agy":      `ENTRYPOINT ["agy"]`,
+	}
+	all := append(BaseNames(), Names()...)
 	for _, name := range all {
 		t.Run(name, func(t *testing.T) {
 			var raw []byte
 			var err error
-			if name == Base {
-				raw, err = ReadBase()
+			isBase := strings.HasPrefix(name, BasePrefix)
+			if isBase {
+				raw, err = ReadBase(strings.TrimPrefix(name, BasePrefix))
 			} else {
 				raw, err = Read(name)
 			}
@@ -105,15 +130,12 @@ func TestBundledImagesFollowTheContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			src := string(raw)
-			if name == Base {
+			if isBase {
 				if strings.Contains(src, "RNES_BASE") {
-					t.Error("the base must not depend on RNES_BASE")
+					t.Error("a base must not depend on RNES_BASE")
 				}
-				if !strings.Contains(src, "npm install -g @opencode/cli") {
-					t.Error("the base must install opencode")
-				}
-				if !strings.Contains(src, `ENTRYPOINT ["opencode"]`) {
-					t.Error("the base must run opencode")
+				if want, ok := wantEntrypoints[name]; ok && !strings.Contains(src, want) {
+					t.Errorf("%s must contain %s", name, want)
 				}
 			}
 
@@ -148,9 +170,9 @@ func TestBundledImagesFollowTheContract(t *testing.T) {
 			if !sawFrom {
 				t.Fatal("no FROM instruction")
 			}
-			if name == Base {
+			if isBase {
 				if lastUser != "rnes" {
-					t.Errorf("the base must end as USER rnes, got %q", lastUser)
+					t.Errorf("a base must end as USER rnes, got %q", lastUser)
 				}
 				return
 			}

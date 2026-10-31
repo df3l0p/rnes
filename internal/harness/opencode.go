@@ -18,6 +18,7 @@ import (
 // on its own.
 type Opencode struct {
 	configPath string
+	args       []string
 	// openWeb starts a known server, opens the web UI, and runs the TUI as a
 	// client of it, so both share one session.
 	openWeb bool
@@ -32,7 +33,25 @@ func newOpencode(opts Options) (Harness, error) {
 	if opts.Sandbox {
 		return newSandbox(opts, configPath), nil
 	}
-	return &Opencode{configPath: configPath, openWeb: opts.WebOpen}, nil
+	return Opencode{configPath: configPath, args: opts.Args, openWeb: opts.WebOpen}, nil
+}
+
+func opencodeProfile(hostConfig string) sandboxProfile {
+	return sandboxProfile{
+		harness:               "opencode",
+		needsModelServer:      true,
+		usesGeneratedConfig:   true,
+		hostConfig:            hostConfig,
+		openRouterEnv:         "OPENROUTER_API_KEY",
+		skillsConfigHome:      containerConfigHome,
+		skillsRelDir:          "opencode/skills",
+		generateSkillCommands: true,
+		webUI:                 true,
+		containerArgs: func(_ string, _ bool, extraArgs []string) []string {
+			// The model comes from the generated config's "model" default.
+			return append([]string{"."}, extraArgs...)
+		},
+	}
 }
 
 // opencodeProvider builds the provider block that points opencode at a
@@ -51,7 +70,7 @@ func opencodeProvider(baseURL string, modelIDs []string) opencodeconfig.Provider
 	}
 }
 
-func (o *Opencode) Available() error {
+func (o Opencode) Available() error {
 	if _, err := exec.LookPath("opencode"); err != nil {
 		return fmt.Errorf("opencode not found on PATH: %w", err)
 	}
@@ -76,11 +95,11 @@ func opencodeIsV2(out string) error {
 	return fmt.Errorf("rnes requires opencode v2, got %q", strings.TrimSpace(out))
 }
 
-func (o *Opencode) Configure(providerKey, baseURL string, modelIDs []string) error {
+func (o Opencode) Configure(providerKey, baseURL string, modelIDs []string) error {
 	return opencodeconfig.Merge(o.configPath, providerKey, opencodeProvider(baseURL, modelIDs))
 }
 
-func (o *Opencode) Run(dir, providerKey, modelID string) error {
+func (o Opencode) Run(dir, providerKey, modelID string) error {
 	// The full TUI takes no model flag, and rewriting the user's configured
 	// default model would outlive the session. So on the host the session
 	// starts on whatever model opencode would pick anyway, and the
@@ -103,7 +122,7 @@ func (o *Opencode) Run(dir, providerKey, modelID string) error {
 // runWithWeb starts opencode's server with a known port and password, opens a
 // pairing link in the browser, then runs the TUI connected to that same
 // server. Both are clients of one server, so they see the same live session.
-func (o *Opencode) runWithWeb(dir string, env []string) error {
+func (o Opencode) runWithWeb(dir string, env []string) error {
 	password, err := newWebPassword()
 	if err != nil {
 		return err
@@ -152,7 +171,7 @@ func (o *Opencode) runWithWeb(dir string, env []string) error {
 	fmt.Fprintf(os.Stderr, "rnes: web server: %s (log: %s)\n", base, logPath)
 	printWebLink(link)
 
-	cmd := exec.Command("opencode", tuiServerArgs(base)...)
+	cmd := exec.Command("opencode", append(tuiServerArgs(base), o.args...)...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
@@ -176,9 +195,9 @@ func (o *Opencode) runWithWeb(dir string, env []string) error {
 // merged into it, and the commands it defines count as collisions. When it
 // can't be read as a plain JSON object, rnes leaves it alone and generates
 // nothing.
-func (o *Opencode) launch(dir string) ([]string, []string) {
+func (o Opencode) launch(dir string) ([]string, []string) {
 	env := append(os.Environ(), "OPENCODE_CONFIG="+o.configPath)
-	plain := []string{"."}
+	plain := append([]string{"."}, o.args...)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rnes: warning: no skill commands: resolving home directory: %v\n", err)
@@ -217,13 +236,13 @@ func (o *Opencode) launch(dir string) ([]string, []string) {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "rnes: skill commands: /%s\n", strings.Join(names, ", /"))
-	return []string{"--standalone", "."}, withEnv(env, inlineConfigEnv, content)
+	return append([]string{"--standalone", "."}, o.args...), withEnv(env, inlineConfigEnv, content)
 }
 
 // globalDir is the opencode config directory holding the user's global
 // commands. OPENCODE_CONFIG_DIR replaces opencode's default one (the CLI
 // points its global config directory at it), as it does for global skills.
-func (o *Opencode) globalDir() string {
+func (o Opencode) globalDir() string {
 	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" {
 		return d
 	}

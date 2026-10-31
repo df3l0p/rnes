@@ -30,9 +30,9 @@ const (
 	// its egress, including to the host's llama-server, goes through the
 	// proxy instead.
 	containerHost = "host.docker.internal"
-	// containerConfigPath is where the generated config is mounted. It's kept
-	// out of the agent's own config directory so docker doesn't create that
-	// directory root-owned inside the container.
+	// containerConfigPath is where opencode's generated config is mounted.
+	// It's kept out of the agent's own config directory so docker doesn't
+	// create that directory root-owned inside the container.
 	containerConfigPath = "/etc/rnes/opencode.jsonc"
 	containerWorkdir    = "/workspace"
 	containerHome       = "/home/rnes"
@@ -42,7 +42,7 @@ const (
 	// containerCAPath is the trust bundle in it (the system roots plus the
 	// session CA), named by rnes-proxy's -ca-out default.
 	containerCAPath = containerCADir + "/ca.pem"
-	// containerConfigHome is the agent's ~/.config. With skills attached it is
+	// containerConfigHome is opencode's ~/.config. With skills attached it is
 	// a host staging directory (see stageConfigHome); otherwise the image's.
 	containerConfigHome = containerHome + "/.config"
 	// containerSkillsDir is where opencode looks for global skills; each
@@ -51,26 +51,73 @@ const (
 )
 
 // caTrustEnv is the environment that makes the agent's tools trust
-// containerCAPath: Node (and so opencode), OpenSSL-based clients, git, curl
-// and Python's requests. Several of these replace the system roots instead of
-// adding to them, which is why the bundle carries the system roots too.
+// containerCAPath: Node (and so opencode), Go's crypto/x509 (SSL_CERT_FILE),
+// OpenSSL-based clients, git, curl and Python's requests. Several of these
+// replace the system roots instead of adding to them, which is why the bundle
+// carries the system roots too.
 var caTrustEnv = []string{"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"}
 
-// Sandbox runs opencode in a Docker container. The container has no direct
-// route to the host; it reaches the host's llama-server through its
-// per-session egress proxy, which is the one that resolves
-// host.docker.internal. The sandbox container mounts the working directory
-// and uses a generated copy of the host's opencode config with the provider
-// baseURL rewritten to be container-reachable; the host config itself is never
-// modified. It needs docker, not opencode, on the host.
+// sandboxProfile captures the harness-specific pieces of a containerized
+// agent so Sandbox can share image building, proxy networking, credential
+// placeholders, .rnes policy protection, and container lifecycle across agents.
+type sandboxProfile struct {
+	// harness names the base image ("base-<harness>").
+	harness string
+	// needsModelServer reports whether the session uses a local llama-server.
+	needsModelServer bool
+	// usesGeneratedConfig reports whether Configure writes a session-local
+	// config file that Run mounts into the container (opencode.jsonc).
+	usesGeneratedConfig bool
+	// hostConfig is the host config file path used by Configure when
+	// usesGeneratedConfig is true.
+	hostConfig string
+	// openRouterEnv is the container env var set to openrouterPlaceholder when
+	// OpenRouterKey is active (e.g. "OPENROUTER_API_KEY" for opencode).
+	openRouterEnv string
+	// extraPolicy is appended to the session's proxy policy (e.g. agy's
+	// no-inspect Google endpoints).
+	extraPolicy string
+	// authVolume returns the per-project Docker named volume for dir, or ""
+	// when the harness uses no auth volume.
+	authVolume func(dir string) string
+	// authLabel is the Docker volume label applied when creating authVolume.
+	authLabel string
+	// authMountTargets are the container paths authVolume is mounted
+	// read-write at. One volume may back several credential locations (agy
+	// keeps OAuth state under both ~/.gemini/antigravity-cli and
+	// ~/.config/antigravity); the paths' file names must not collide, since
+	// they all land at the volume's root.
+	authMountTargets []string
+	// skillsConfigHome is the container parent directory staged from the host
+	// when skills (or skill commands) are mounted.
+	skillsConfigHome string
+	// skillsRelDir is the path relative to skillsConfigHome where each skill
+	// is mounted read-only.
+	skillsRelDir string
+	// generateSkillCommands enables opencode's synthetic /<skill> command
+	// generation into skillsConfigHome.
+	generateSkillCommands bool
+	// webUI reports whether the harness serves opencode's web UI, which rnes
+	// can expose on a loopback port and open in the browser.
+	webUI bool
+	// containerArgs returns the arguments passed to the image's ENTRYPOINT.
+	containerArgs func(modelID string, modelSet bool, extraArgs []string) []string
+}
+
+// Sandbox runs a coding agent in a Docker container. The container has no
+// direct route to the host; all its egress (including to the host's
+// llama-server, when used) goes through its per-session egress proxy, which is
+// the one that resolves host.docker.internal. It needs docker on the host, not
+// the agent executable itself.
 type Sandbox struct {
+	profile sandboxProfile
 	// name selects the bundled image (see package images).
 	name string
 	// image is the tag sessions run, set by Prepare.
 	image string
 	build bool
 	// hostConfig is the user's opencode config, used as the base of the
-	// generated one.
+	// generated one when profile.usesGeneratedConfig is true.
 	hostConfig string
 	// generated is the temp file written by Configure and mounted into the
 	// container; removed when Run returns.
@@ -107,14 +154,17 @@ type Sandbox struct {
 	// openrouterKey and openrouterPlaceholder are the same for OpenRouter.
 	openrouterKey         string
 	openrouterPlaceholder string
-	// skills are mounted read-only under containerSkillsDir.
+	// skills are mounted read-only under profile.skillsConfigHome.
 	skills []skills.Skill
 	// customPolicy, when non-nil, replaces defaultPolicy as the base of the
 	// session's egress allow-list (see Options.Policy).
 	customPolicy []byte
-	// configHome is the host staging directory mounted as the agent's
-	// ~/.config when skills are attached, set by Run.
+	// configHome is the host staging directory mounted at
+	// profile.skillsConfigHome when skills are attached, set by Run.
 	configHome string
+	// modelSet and extraArgs come from Options.ModelSet and Options.Args.
+	modelSet  bool
+	extraArgs []string
 }
 
 // hostOS is runtime.GOOS, replaceable in tests.
@@ -137,11 +187,85 @@ var isLocalIP = func(ip net.IP) bool {
 }
 
 func newSandbox(opts Options, hostConfig string) *Sandbox {
+	return newSandboxWithProfile(opts, opencodeProfile(hostConfig))
+}
+
+// checkExtraPolicy rejects a session policy that lists one of the profile's
+// harness-required no-inspect endpoints for TLS inspection: the harness only
+// works with those endpoints tunnelled unread, so the two can't both apply,
+// and silently downgrading the user's entry would hide that from them. The
+// profile's own defaults (used when policy is nil) never conflict, but the
+// check covers them anyway so a future harness can't ship one that does.
+func checkExtraPolicy(policy []byte, profile sandboxProfile) error {
+	if profile.extraPolicy == "" {
+		return nil
+	}
+	user := policy
+	if user == nil {
+		user = defaultPolicy
+	}
+	if len(user) == 0 {
+		return nil
+	}
+	userPol, err := proxy.ParseUserPolicy(bytes.NewReader(user))
+	if err != nil {
+		return fmt.Errorf("checking the session policy: %w", err)
+	}
+	extraPol, err := proxy.ParsePolicy(strings.NewReader(profile.extraPolicy))
+	if err != nil {
+		return fmt.Errorf("checking the %s harness policy: %w", profile.harness, err)
+	}
+	var conflicts []string
+	for hp := range extraPol.NoInspect {
+		if userPol.Explicit(hp) && !userPol.SkipsInspect(hp) {
+			conflicts = append(conflicts, hp)
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	sort.Strings(conflicts)
+	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; mark it 'no-inspect' in %s or remove it there",
+		profile.harness, strings.Join(conflicts, ", "), ProjectPolicyRel, ProjectPolicyRel)
+}
+
+func newSandboxWithProfile(opts Options, profile sandboxProfile) *Sandbox {
 	name := opts.Image
 	if name == "" {
 		name = images.Default
 	}
-	return &Sandbox{name: name, build: opts.Build, allNet: opts.AllNet, inspect: !opts.NoInspect, webExpose: opts.WebExpose, openWeb: opts.WebOpen, githubToken: opts.GitHubToken, openrouterKey: opts.OpenRouterKey, skills: opts.Skills, customPolicy: opts.Policy, hostConfig: hostConfig, hostIP: "host-gateway"}
+	return &Sandbox{
+		profile:       profile,
+		name:          name,
+		build:         opts.Build,
+		allNet:        opts.AllNet,
+		inspect:       !opts.NoInspect,
+		webExpose:     opts.WebExpose && profile.webUI,
+		openWeb:       opts.WebOpen && profile.webUI,
+		githubToken:   opts.GitHubToken,
+		openrouterKey: opts.OpenRouterKey,
+		skills:        opts.Skills,
+		customPolicy:  opts.Policy,
+		hostConfig:    profile.hostConfig,
+		hostIP:        "host-gateway",
+		modelSet:      opts.ModelSet,
+		extraArgs:     opts.Args,
+	}
+}
+
+// NeedsModelServer reports whether this sandbox session uses a local
+// llama-server.
+func (s *Sandbox) NeedsModelServer() bool {
+	return s.profile.needsModelServer
+}
+
+// AuthVolume returns the Docker named volume used to persist OAuth/session
+// state for dir, or "" when this sandbox uses no auth volume.
+func (s *Sandbox) AuthVolume(dir string) string {
+	if s.profile.authVolume == nil {
+		return ""
+	}
+	return s.profile.authVolume(dir)
 }
 
 // BindHost returns the address llama-server should listen on so the container
@@ -198,8 +322,8 @@ func (s *Sandbox) Available() error {
 // Prepare makes sure the selected sandbox image exists locally. rnes never pulls
 // its images from a registry (supply-chain hygiene): it uses a local image if
 // present, and otherwise builds it from the bundled Dockerfile, failing if the
-// build fails. Every selectable image is a layer on the internal base image,
-// which is ensured first. With -build both are rebuilt even if they exist.
+// build fails. Every selectable image is a layer on the harness's internal base
+// image, which is ensured first. With -build both are rebuilt even if they exist.
 //
 // Images are tagged rnes-sandbox-<name>:<hash>, the hash covering the Dockerfile
 // (and, for a layer, its base's tag), so a changed Dockerfile builds a new image
@@ -208,14 +332,27 @@ func (s *Sandbox) Prepare() error {
 	return s.prepare([]string{s.name})
 }
 
-// PrepareAll is Prepare for every bundled image, with the base and the proxy
-// image built once: what -sandbox-update does when no -image is given.
+// PrepareAll is Prepare for every bundled selectable image on this harness's
+// base, with the base and the proxy image built once: what -sandbox-update does
+// when -harness is explicitly selected without -image.
 func (s *Sandbox) PrepareAll() error {
 	return s.prepare(images.Names())
 }
 
 func (s *Sandbox) prepare(names []string) error {
-	base, err := images.ReadBase()
+	if err := s.prepareImages(names); err != nil {
+		return err
+	}
+	proxyTag, err := prepareProxyImage(s.build)
+	if err != nil {
+		return fmt.Errorf("preparing proxy image: %w", err)
+	}
+	s.proxyImage = proxyTag
+	return nil
+}
+
+func (s *Sandbox) prepareImages(names []string) error {
+	base, err := images.ReadBase(s.profile.harness)
 	if err != nil {
 		return err
 	}
@@ -226,7 +363,7 @@ func (s *Sandbox) prepare(names []string) error {
 		}
 	}
 
-	baseTag := imageTag(images.Base, base, "")
+	baseTag := imageTag(images.BaseName(s.profile.harness), base, "")
 	if err := s.ensure(baseTag, base, ""); err != nil {
 		return err
 	}
@@ -240,19 +377,13 @@ func (s *Sandbox) prepare(names []string) error {
 			s.image = tag
 		}
 	}
-
-	proxyTag, err := prepareProxyImage(s.build)
-	if err != nil {
-		return fmt.Errorf("preparing proxy image: %w", err)
-	}
-	s.proxyImage = proxyTag
 	return nil
 }
 
 // ensure builds tag from dockerfile unless it exists locally (or -build was
 // given). A non-empty baseTag is passed as the RNES_BASE build arg. -build also
-// skips docker's layer cache: the Dockerfiles' apt and npm steps are unpinned,
-// so cached layers would keep serving old packages and an old opencode.
+// skips docker's layer cache: the Dockerfiles' apt and installer steps are
+// unpinned, so cached layers would keep serving old packages and an old agent.
 func (s *Sandbox) ensure(tag string, dockerfile []byte, baseTag string) error {
 	if !s.build && exec.Command("docker", "image", "inspect", tag).Run() == nil {
 		return nil
@@ -293,7 +424,11 @@ func layerBuildArgs(tag, baseTag string) []string {
 
 // Configure writes a copy of the host opencode config, with the provider
 // pointed at baseURL as seen from inside a container, to a private temp file.
+// For harnesses that don't use a generated config file, Configure is a no-op.
 func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) error {
+	if !s.profile.usesGeneratedConfig {
+		return nil
+	}
 	containerURL, err := containerBaseURL(baseURL)
 	if err != nil {
 		return err
@@ -331,15 +466,19 @@ func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) erro
 }
 
 func (s *Sandbox) Run(dir, providerKey, modelID string) error {
-	if s.generated == "" {
-		return fmt.Errorf("sandbox: Configure must be called before Run")
+	if s.profile.usesGeneratedConfig {
+		if s.generated == "" {
+			return fmt.Errorf("sandbox: Configure must be called before Run")
+		}
+		defer os.Remove(s.generated)
 	}
-	defer os.Remove(s.generated)
 	if s.image == "" || s.proxyImage == "" {
 		return fmt.Errorf("sandbox: Prepare must be called before Run")
 	}
-	if err := s.applyModel(providerKey, modelID); err != nil {
-		return err
+	if s.profile.usesGeneratedConfig {
+		if err := s.applyModel(providerKey, modelID); err != nil {
+			return err
+		}
 	}
 	// Ensure <dir>/.rnes exists on the host (owned by the user, never a
 	// symlink) so runArgs can always bind-mount it read-only at /workspace/.rnes.
@@ -347,20 +486,35 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		return err
 	}
 
-	// The staged ~/.config holds the attached skills' mount points and the
-	// skill commands, so it exists when either does: the project's own skills
-	// get commands even when no -skill was given.
-	commands := s.skillCommandNames(dir)
+	if vol := s.AuthVolume(dir); vol != "" {
+		volArgs := []string{"volume", "create"}
+		if s.profile.authLabel != "" {
+			volArgs = append(volArgs, "--label", s.profile.authLabel)
+		}
+		volArgs = append(volArgs, vol)
+		if out, err := exec.Command("docker", volArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("creating auth volume %s: %w: %s", vol, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Stage the skills parent directory when skills are attached (or, for
+	// opencode, when project skills get synthetic /<name> commands).
+	var commands []string
+	if s.profile.generateSkillCommands {
+		commands = s.skillCommandNames(dir)
+	}
 	if len(s.skills) > 0 || len(commands) > 0 {
-		home, err := stageConfigHome(s.skills)
+		home, err := stageSkillsHome(s.profile.skillsRelDir, s.skills)
 		if err != nil {
 			return err
 		}
 		s.configHome = home
-		s.writeSkillCommands(home, commands)
+		if s.profile.generateSkillCommands {
+			s.writeSkillCommands(home, commands)
+		}
 		defer func() {
 			if err := os.RemoveAll(home); err != nil {
-				fmt.Fprintf(os.Stderr, "rnes: warning: couldn't remove the sandbox's ~/.config staging directory %s: %v\n", home, err)
+				fmt.Fprintf(os.Stderr, "rnes: warning: couldn't remove the sandbox's skills staging directory %s: %v\n", home, err)
 			}
 		}()
 	}
@@ -407,7 +561,7 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	}
 	defer pn.stop()
 	if pn.logFile != "" {
-		// To stderr, before opencode takes the terminal over.
+		// To stderr, before the agent takes the terminal over.
 		fmt.Fprintf(os.Stderr, "rnes: sandbox proxy log: %s\n", pn.logFile)
 	}
 
@@ -415,7 +569,7 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	// daemon noticing; --rm covers the normal path.
 	defer exec.Command("docker", "rm", "-f", name).Run()
 
-	cmd := exec.Command("docker", s.runArgs(name, dir, pn, stdinIsTTY())...)
+	cmd := exec.Command("docker", s.runArgsForModel(name, dir, pn, stdinIsTTY(), modelID)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -485,14 +639,18 @@ func (s *Sandbox) applyModel(providerKey, modelID string) error {
 }
 
 // policy is this session's proxy allow-list: the project's policy (or the
-// shipped defaults) plus llama-server, and with -all-net any public host.
-// Built fresh each call, so sessions never share or change defaultPolicy.
+// shipped defaults) plus any harness-specific endpoints, llama-server, and
+// with -all-net any public host. Built fresh each call, so sessions never share
+// or change defaultPolicy.
 func (s *Sandbox) policy() []byte {
 	var b bytes.Buffer
 	if s.customPolicy != nil {
 		b.Write(s.customPolicy)
 	} else {
 		b.Write(defaultPolicy)
+	}
+	if s.profile.extraPolicy != "" {
+		b.WriteString("\n" + s.profile.extraPolicy)
 	}
 	if s.modelServer != "" {
 		b.WriteString("\n# this session's llama-server\nprivate " + s.modelServer + "\n")
@@ -506,12 +664,18 @@ func (s *Sandbox) policy() []byte {
 	return b.Bytes()
 }
 
-// runArgs builds the docker argv for one session. The sandbox no longer
-// gets a direct host.docker.internal route or unrestricted egress: it only
-// reaches pn's network, and all HTTP(S) traffic is forced through pn's
-// proxy container. Both spellings of the proxy variables are set: curl, for
-// one, ignores uppercase HTTP_PROXY.
+// runArgs builds the docker argv for one session without an explicit model ID
+// (kept as a convenience for existing tests).
 func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
+	return s.runArgsForModel(name, dir, pn, tty, "")
+}
+
+// runArgsForModel builds the docker argv for one session. The sandbox gets no
+// direct host.docker.internal route or unrestricted egress: it only reaches
+// pn's network, and all HTTP(S) traffic is forced through pn's proxy
+// container. Both spellings of the proxy variables are set: curl, for one,
+// ignores uppercase HTTP_PROXY.
+func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, modelID string) []string {
 	flags := "-i"
 	if tty {
 		flags = "-it"
@@ -534,10 +698,21 @@ func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
 		"-e", "no_proxy=localhost,127.0.0.1,::1",
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-e", "HOME=" + containerHome,
-		"-e", "OPENCODE_CONFIG=" + containerConfigPath,
-		"-v", dir + ":" + containerWorkdir,
+	}
+	if s.profile.usesGeneratedConfig {
+		args = append(args, "-e", "OPENCODE_CONFIG="+containerConfigPath)
+	}
+	args = append(args,
+		"-v", dir+":"+containerWorkdir,
 		"--mount", bindMount(filepath.Join(dir, ProjectStateDir), containerWorkdir+"/"+ProjectStateDir, true),
-		"-v", s.generated + ":" + containerConfigPath + ":ro",
+	)
+	if s.profile.usesGeneratedConfig {
+		args = append(args, "-v", s.generated+":"+containerConfigPath+":ro")
+	}
+	if vol := s.AuthVolume(dir); vol != "" && len(s.profile.authMountTargets) > 0 {
+		for _, target := range s.profile.authMountTargets {
+			args = append(args, "-v", vol+":"+target)
+		}
 	}
 	// The proxy terminates TLS for some hosts with its own CA: trust it, via
 	// the volume it wrote its bundle to. Mounted at runtime, never baked into
@@ -551,9 +726,8 @@ func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
 	if s.githubPlaceholder != "" {
 		args = append(args, githubEnv(s.githubPlaceholder)...)
 	}
-	if s.openrouterPlaceholder != "" {
-		// opencode's built-in openrouter provider reads its key from here.
-		args = append(args, "-e", "OPENROUTER_API_KEY="+s.openrouterPlaceholder)
+	if s.openrouterPlaceholder != "" && s.profile.openRouterEnv != "" {
+		args = append(args, "-e", s.profile.openRouterEnv+"="+s.openrouterPlaceholder)
 	}
 	if s.webExpose {
 		args = append(args, "-e", webPasswordEnv+"="+s.webPassword)
@@ -569,11 +743,11 @@ func (s *Sandbox) runArgs(name, dir string, pn *proxyNet, tty bool) []string {
 			s.image, "-c", s.webScript(),
 		)
 	}
-	return append(args,
-		s.image,
-		// The model comes from the generated config's "model" default.
-		".",
-	)
+	args = append(args, s.image)
+	if s.profile.containerArgs != nil {
+		args = append(args, s.profile.containerArgs(modelID, s.modelSet, s.extraArgs)...)
+	}
+	return args
 }
 
 // webScript is the container command for a web session: start the server on
@@ -605,23 +779,25 @@ func newPlaceholder() (string, error) {
 	return "rnes_placeholder_" + hex.EncodeToString(b[:]), nil
 }
 
-// skillMounts are the docker arguments for the staged ~/.config (nothing when
-// the session has none) and for attaching s.skills: each skill's directory
-// bind-mounted read-only at containerSkillsDir/<name>, so it stays live and
-// nothing else on the host is visible. A symlink inside a skill resolves in
-// the container, so one pointing outside its directory dangles.
+// skillMounts are the docker arguments for the staged skills parent directory
+// (nothing when the session has none) and for attaching s.skills: each skill's
+// directory bind-mounted read-only at <skillsConfigHome>/<skillsRelDir>/<name>,
+// so it stays live and nothing else on the host is visible. A symlink inside a
+// skill resolves in the container, so one pointing outside its directory
+// dangles.
 //
-// Docker would create the mount points' missing parents (~/.config,
-// ~/.config/opencode) root-owned, leaving opencode unable to write its config
-// directory. So ~/.config itself is a host staging directory owned by the
-// session's user, with the mount points already in it (see stageConfigHome).
+// Docker would create the mount points' missing parents root-owned, leaving the
+// agent unable to write its config directory. So skillsConfigHome itself is a
+// host staging directory owned by the session's user, with the mount points
+// already in it (see stageSkillsHome).
 func (s *Sandbox) skillMounts() []string {
 	if s.configHome == "" {
 		return nil
 	}
-	args := []string{"--mount", bindMount(s.configHome, containerConfigHome, false)}
+	targetBase := s.profile.skillsConfigHome + "/" + s.profile.skillsRelDir
+	args := []string{"--mount", bindMount(s.configHome, s.profile.skillsConfigHome, false)}
 	for _, sk := range s.skills {
-		args = append(args, "--mount", bindMount(sk.Dir, containerSkillsDir+"/"+sk.Name, true))
+		args = append(args, "--mount", bindMount(sk.Dir, targetBase+"/"+sk.Name, true))
 	}
 	return args
 }
@@ -641,21 +817,25 @@ func bindMount(src, dst string, readonly bool) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// stageConfigHome creates the host directory mounted as the agent's ~/.config
-// when skills are attached: private to the user, with an empty
-// opencode/skills/<name> mount point per skill. Creating the mount points here
-// means docker doesn't create them, as root, in a directory rnes must remove
-// afterwards. The agent's writes to ~/.config land here and are removed with
-// it when the session ends, as they would be with the container.
+// stageConfigHome creates opencode's staged ~/.config directory with
+// opencode/skills/<name> mount points.
 func stageConfigHome(attached []skills.Skill) (string, error) {
+	return stageSkillsHome("opencode/skills", attached)
+}
+
+// stageSkillsHome creates the host directory mounted at skillsConfigHome when
+// skills are attached: private to the user, with an empty <relDir>/<name> mount
+// point per skill. Creating the mount points here means docker doesn't create
+// them, as root, in a directory rnes must remove afterwards.
+func stageSkillsHome(relDir string, attached []skills.Skill) (string, error) {
 	dir, err := os.MkdirTemp("", "rnes-sandbox-home-config-*")
 	if err != nil {
-		return "", fmt.Errorf("creating the sandbox's ~/.config: %w", err)
+		return "", fmt.Errorf("creating the sandbox's skills staging directory: %w", err)
 	}
 	for _, sk := range attached {
-		if err := os.MkdirAll(filepath.Join(dir, "opencode", "skills", sk.Name), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.FromSlash(relDir), sk.Name), 0o755); err != nil {
 			os.RemoveAll(dir)
-			return "", fmt.Errorf("creating the sandbox's ~/.config: %w", err)
+			return "", fmt.Errorf("creating the sandbox's skills staging directory: %w", err)
 		}
 	}
 	return dir, nil

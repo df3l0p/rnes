@@ -413,3 +413,46 @@ func TestInterceptedHostIsStillSubjectToThePolicy(t *testing.T) {
 		t.Fatal("request to a host outside the policy succeeded")
 	}
 }
+
+func TestNoInspectEntryTunnelsEvenWhenCACoversHost(t *testing.T) {
+	hostport, upstreamTrust := newUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "tunnelled upstream")
+	}))
+	ca, err := NewCA([]string{"localhost"})
+	if err != nil {
+		t.Fatalf("NewCA: %v", err)
+	}
+	pol := NewPrivatePolicy([]string{hostport})
+	pol.AllowNoInspect(hostport)
+	audit := &auditLog{}
+	var hookCalled atomic.Bool
+	srv := &Server{
+		Policy: pol,
+		CA:     ca,
+		Logf:   audit.Logf,
+		OnRequest: func(*http.Request, string) error {
+			hookCalled.Store(true)
+			return nil
+		},
+	}
+	px := httptest.NewServer(srv)
+	defer px.Close()
+
+	// Client trusts ONLY the real upstream's CA (not the proxy's session CA),
+	// proving TLS is tunnelled end-to-end rather than terminated by the proxy.
+	resp, err := clientVia(mustParseURL(t, px.URL), upstreamTrust).Get("https://" + hostport + "/grpc.Service/Call")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "tunnelled upstream" {
+		t.Errorf("body = %q, want %q", body, "tunnelled upstream")
+	}
+	if hookCalled.Load() {
+		t.Error("OnRequest must not run on a no-inspect tunnel")
+	}
+	if got := audit.String(); !strings.Contains(got, "CONNECT "+hostport+" -> tunnelled") {
+		t.Errorf("audit log = %q, want CONNECT tunnelled line", got)
+	}
+}

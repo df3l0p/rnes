@@ -106,14 +106,39 @@ func TestParsePolicyPrivateEntry(t *testing.T) {
 }
 
 func TestParseUserPolicyRejectsStarAndPrivate(t *testing.T) {
-	pol, err := ParseUserPolicy(strings.NewReader("# comment\npypi.org:443\n"))
-	if err != nil || !pol.Explicit("pypi.org:443") || pol.AnyPublic || pol.AllowsPrivate("pypi.org:443") {
+	pol, err := ParseUserPolicy(strings.NewReader("# comment\npypi.org:443\nno-inspect grpc.example.com:443\n"))
+	if err != nil || !pol.Explicit("pypi.org:443") || !pol.Explicit("grpc.example.com:443") || pol.AnyPublic || pol.AllowsPrivate("pypi.org:443") {
 		t.Fatalf("ParseUserPolicy valid = (%+v, %v)", pol, err)
+	}
+	if !pol.SkipsInspect("grpc.example.com:443") || pol.SkipsInspect("pypi.org:443") {
+		t.Errorf("SkipsInspect mismatch: %+v", pol)
+	}
+	if got := strings.Join(pol.DNSHosts(), ","); got != "pypi.org" {
+		t.Errorf("DNSHosts = %q, want only pypi.org (no-inspect entries excluded)", got)
 	}
 	if _, err := ParseUserPolicy(strings.NewReader("pypi.org:443\n*\n")); err == nil || !strings.Contains(err.Error(), "-all-net") {
 		t.Errorf("ParseUserPolicy(*) = %v, want error naming -all-net", err)
 	}
 	if _, err := ParseUserPolicy(strings.NewReader("private host.docker.internal:8080\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Errorf("ParseUserPolicy(private) = %v, want line 1 error", err)
+	}
+	if _, err := ParseUserPolicy(strings.NewReader("no-inspect bad_port\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("ParseUserPolicy(no-inspect malformed) = %v, want line 1 error", err)
+	}
+}
+
+func TestParsePolicyNoInspectExcludesHostFromDNSHosts(t *testing.T) {
+	pol, err := ParsePolicy(strings.NewReader("no-inspect accounts.google.com:443\ngithub.com:443\n"))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	if !pol.Allows("accounts.google.com:443") || !pol.Explicit("accounts.google.com:443") || !pol.SkipsInspect("ACCOUNTS.GOOGLE.COM:443") {
+		t.Errorf("no-inspect entry should be allowed, explicit, and SkipsInspect: %+v", pol)
+	}
+	if got := strings.Join(pol.DNSHosts(), ","); got != "github.com" {
+		t.Errorf("DNSHosts = %q, want github.com only", got)
+	}
+	if got := strings.Join(pol.SortedAllow(), ","); got != "accounts.google.com:443,github.com:443" {
+		t.Errorf("SortedAllow = %q", got)
 	}
 }

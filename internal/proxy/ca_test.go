@@ -188,6 +188,80 @@ func TestBundleHoldsSystemRootsAndTheCA(t *testing.T) {
 	}
 }
 
+func writeRoots(t *testing.T, content string) string {
+	t.Helper()
+	roots := filepath.Join(t.TempDir(), "roots.pem")
+	if err := os.WriteFile(roots, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return roots
+}
+
+func TestTrustBundleReturnsACAAndItsBundleWhenThereIsAHostToIntercept(t *testing.T) {
+	pol, err := ParsePolicy(strings.NewReader("github.com:443\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := NewCA([]string{"models.dev"}) // stands in for a system root
+	roots := writeRoots(t, string(other.CertPEM()))
+
+	ca, bundle, err := TrustBundle(pol, roots)
+	if err != nil {
+		t.Fatalf("TrustBundle: %v", err)
+	}
+	if ca == nil {
+		t.Fatal("TrustBundle = nil CA, want one for the policy's DNS host")
+	}
+	if !strings.Contains(string(bundle), string(ca.CertPEM())) {
+		t.Error("bundle must carry the session CA's certificate")
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(bundle) {
+		t.Fatal("bundle is not valid PEM")
+	}
+	if n := strings.Count(string(bundle), "BEGIN CERTIFICATE"); n != 2 {
+		t.Errorf("bundle has %d certificates, want the system root and the session CA", n)
+	}
+}
+
+func TestTrustBundleReturnsSystemRootsAloneWhenNothingIsIntercepted(t *testing.T) {
+	// Every allowed host skips inspection, so there is no CA at all — but the
+	// bundle must still validate real upstream certificates.
+	pol, err := ParsePolicy(strings.NewReader("no-inspect grpc.example.com:443\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := NewCA([]string{"models.dev"}) // stands in for a system root
+	// Without the trailing newline, to pin TrustBundle's normalization to
+	// CA.Bundle's.
+	roots := writeRoots(t, strings.TrimSuffix(string(other.CertPEM()), "\n"))
+
+	ca, bundle, err := TrustBundle(pol, roots)
+	if err != nil {
+		t.Fatalf("TrustBundle: %v", err)
+	}
+	if ca != nil {
+		t.Fatalf("TrustBundle = a CA, want nil with nothing to intercept")
+	}
+	if string(bundle) != string(other.CertPEM()) {
+		t.Errorf("bundle = %q, want the system roots alone", bundle)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(bundle) {
+		t.Fatal("bundle is not valid PEM")
+	}
+}
+
+func TestTrustBundleSurfacesSystemRootErrors(t *testing.T) {
+	pol, err := ParsePolicy(strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := TrustBundle(pol, filepath.Join(t.TempDir(), "absent.pem")); err == nil || !strings.Contains(err.Error(), "system roots") {
+		t.Errorf("TrustBundle(missing roots) = %v, want a system-roots error", err)
+	}
+}
+
 func TestBundleFailsWithoutSystemRoots(t *testing.T) {
 	ca, err := NewCA([]string{"github.com"})
 	if err != nil {

@@ -86,8 +86,8 @@ func InjectorFromStdin(r *bufio.Reader, pol Policy, logf func(string, ...any)) (
 	in := &Injector{Providers: providers, Logf: logf}
 	for _, p := range providers {
 		for _, h := range p.Hosts() {
-			if !pol.Explicit(h) {
-				in.logf("rnes-proxy: provider %s: %s is not listed explicitly in policy; credential will not be injected there", p.Name(), h)
+			if !pol.Explicit(h) || pol.SkipsInspect(h) {
+				in.logf("rnes-proxy: provider %s: %s is not listed as an intercepted host in policy; credential will not be injected there", p.Name(), h)
 			}
 		}
 	}

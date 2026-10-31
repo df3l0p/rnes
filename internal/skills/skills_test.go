@@ -49,11 +49,16 @@ func (e env) skill(dir, name string) string {
 }
 
 func (e env) opencode() string { return filepath.Join(e.home, ".config", "opencode", "skills") }
+func (e env) agy() string      { return filepath.Join(e.home, ".gemini", "config", "skills") }
 func (e env) agents() string   { return filepath.Join(e.home, ".agents", "skills") }
 func (e env) claude() string   { return filepath.Join(e.home, ".claude", "skills") }
 
 func (e env) resolve(values []string, dirs ...string) ([]Skill, []string, error) {
 	return Resolve(Request{Values: values, Dirs: dirs, Home: e.home, Cwd: e.cwd})
+}
+
+func (e env) resolveFor(harness string, values []string, dirs ...string) ([]Skill, []string, error) {
+	return Resolve(Request{Values: values, Dirs: dirs, Home: e.home, Cwd: e.cwd, Harness: harness})
 }
 
 func names(skills []Skill) string {
@@ -85,6 +90,7 @@ func TestNameResolvesInSourceOrder(t *testing.T) {
 		source func(env) string
 	}{
 		{"opencode", env.opencode},
+		{"agy", env.agy},
 		{"agents", env.agents},
 		{"claude", env.claude},
 	} {
@@ -356,19 +362,42 @@ func TestAllSkipsInvalidEntriesWithAWarning(t *testing.T) {
 }
 
 func TestProjectCollisionWarns(t *testing.T) {
-	for _, d := range projectDirs {
-		t.Run(d, func(t *testing.T) {
+	for _, tc := range []struct{ harness, dir string }{
+		{"opencode", ".opencode/skills"},
+		{"opencode", ".opencode/skill"},
+		{"agy", ".agent/skills"},
+		{"opencode", ".claude/skills"},
+		{"opencode", ".agents/skills"},
+	} {
+		t.Run(tc.harness+"/"+tc.dir, func(t *testing.T) {
 			e := newEnv(t)
 			e.skill(e.opencode(), "foo")
-			e.skill(filepath.Join(e.cwd, d), "foo")
-			got, warns, err := e.resolve([]string{"foo"})
+			e.skill(filepath.Join(e.cwd, tc.dir), "foo")
+			got, warns, err := e.resolveFor(tc.harness, []string{"foo"})
 			if err != nil || len(got) != 1 {
 				t.Fatalf("got %v, %v", got, err)
 			}
-			if len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(d, "foo")) {
+			if len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(tc.dir, "foo")) {
 				t.Errorf("warnings = %q", warns)
 			}
 		})
+	}
+}
+
+// TestProjectCollisionWarningFollowsTheHarness keeps the warning to
+// directories the active harness reads: .agent/skills is agy's project
+// directory, so an opencode session must not be told opencode might use it.
+func TestProjectCollisionWarningFollowsTheHarness(t *testing.T) {
+	e := newEnv(t)
+	e.skill(e.opencode(), "foo")
+	e.skill(filepath.Join(e.cwd, ".agent", "skills"), "foo")
+
+	if _, warns, err := e.resolveFor("opencode", []string{"foo"}); err != nil || len(warns) != 0 {
+		t.Errorf("opencode: warnings = %q, err = %v, want none", warns, err)
+	}
+	_, warns, err := e.resolveFor("agy", []string{"foo"})
+	if err != nil || len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(".agent", "skills", "foo")) {
+		t.Errorf("agy: warnings = %q, err = %v, want one naming .agent/skills/foo", warns, err)
 	}
 }
 
@@ -457,5 +486,27 @@ func TestSummary(t *testing.T) {
 	got := Summary([]Skill{{Name: "a", Source: "/s1"}, {Name: "b", Source: "/s2"}})
 	if got != "a (/s1), b (/s2)" {
 		t.Errorf("Summary = %q", got)
+	}
+}
+
+func TestAllPrefersActiveHarnessGlobalSkillsFolder(t *testing.T) {
+	e := newEnv(t)
+	oc := e.skill(e.opencode(), "shared")
+	ag := e.skill(e.agy(), "shared")
+
+	got, warns, err := Resolve(Request{Values: []string{"all"}, Home: e.home, Cwd: e.cwd, Harness: "opencode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Dir != oc || len(warns) != 1 || !strings.Contains(warns[0], ag) {
+		t.Errorf("opencode: got %+v, warns %q", got, warns)
+	}
+
+	got, warns, err = Resolve(Request{Values: []string{"all"}, Home: e.home, Cwd: e.cwd, Harness: "agy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Dir != ag || len(warns) != 1 || !strings.Contains(warns[0], oc) {
+		t.Errorf("agy: got %+v, warns %q", got, warns)
 	}
 }
