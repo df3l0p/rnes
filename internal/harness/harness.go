@@ -82,6 +82,13 @@ type Options struct {
 	// Skills are host skills to mount read-only into the sandbox, where
 	// opencode looks for global skills (with Sandbox; see package skills).
 	Skills []skills.Skill
+	// WebExpose serves opencode's web UI for the session (in the sandbox,
+	// through the proxy's loopback forward). The TUI keeps running against the
+	// same server, so both share one session. On the host the server already
+	// serves the UI; exposing it there needs nothing extra.
+	WebExpose bool
+	// WebOpen opens the web UI in the browser at startup. Implies WebExpose.
+	WebOpen bool
 	// Policy, when non-nil (with Sandbox), replaces the built-in default
 	// egress allow-list (e.g. from .rnes/policy.txt). An empty non-nil slice
 	// allows nothing besides this session's llama-server (plus openrouter.ai

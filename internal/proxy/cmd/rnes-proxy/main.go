@@ -7,10 +7,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/df3l0p/rnes/internal/proxy"
 )
@@ -22,6 +25,7 @@ func main() {
 	caOut := flag.String("ca-out", "/ca/ca.pem", "with -intercept: where to write the trust bundle (the system roots plus the session CA's certificate; the CA's key is never written)")
 	systemRoots := flag.String("system-roots", "/etc/ssl/certs/ca-certificates.crt", "with -intercept: the system trust roots to include in the bundle")
 	providersStdin := flag.Bool("providers-stdin", false, "with -intercept: read one line of provider config (credentials to inject) from stdin before listening")
+	forward := flag.String("forward", "", "with the sandbox's web UI: a passive TCP forward, as listen-target (e.g. :4097=sandbox:4096); it only dials the target for accepted connections")
 	flag.Parse()
 	if *providersStdin && !*intercept {
 		log.Fatal("rnes-proxy: -providers-stdin needs -intercept: credentials can only be injected into decrypted requests")
@@ -72,9 +76,49 @@ func main() {
 	if err != nil {
 		log.Fatalf("rnes-proxy: %v", err)
 	}
+	if *forward != "" {
+		if err := startForward(*forward); err != nil {
+			log.Fatalf("rnes-proxy: %v", err)
+		}
+	}
 	// rnes waits for this line before starting the sandbox, so print it only
 	// once the port is actually bound (and, with -intercept, the bundle is
 	// written, which it is by now).
 	fmt.Printf("rnes-proxy: listening on %s\n", ln.Addr())
 	log.Fatal(http.Serve(ln, srv))
+}
+
+// startForward runs the web UI's forwarder. spec is listen-target: it listens
+// on listen inside the proxy container and dials target for every accepted
+// connection. It is passive: the sandbox can't use it to reach anything, and
+// only the published loopback port can reach it.
+func startForward(spec string) error {
+	listen, target, ok := strings.Cut(spec, "=")
+	if !ok || listen == "" || target == "" {
+		return fmt.Errorf("-forward wants listen=target, got %q", spec)
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("forward listener: %w", err)
+	}
+	fmt.Printf("rnes-proxy: forwarding %s to %s\n", ln.Addr(), target)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				up, err := net.DialTimeout("tcp", target, 10*time.Second)
+				if err != nil {
+					return
+				}
+				defer up.Close()
+				go func() { io.Copy(up, conn); up.Close() }()
+				io.Copy(conn, up)
+			}()
+		}
+	}()
+	return nil
 }

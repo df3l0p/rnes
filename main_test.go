@@ -344,3 +344,15 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 		t.Errorf("empty policy = (rawNil=%v, err=%v, out=%q)", raw == nil, err, buf.String())
 	}
 }
+
+func TestWebAndNoWebAreMutuallyExclusive(t *testing.T) {
+	if err := (cliConfig{web: true, noWeb: true}).validate(); err == nil || !strings.Contains(err.Error(), "-web") {
+		t.Errorf("validate(-web -no-web) = %v, want an error", err)
+	}
+	if err := (cliConfig{web: true}).validate(); err != nil {
+		t.Errorf("validate(-web) = %v", err)
+	}
+	if err := (cliConfig{noWeb: true}).validate(); err != nil {
+		t.Errorf("validate(-no-web) = %v", err)
+	}
+}

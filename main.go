@@ -46,6 +46,11 @@ type cliConfig struct {
 	allNet bool
 	// noInspect turns off TLS interception in the sandbox's proxy.
 	noInspect bool
+	// web opens the session's web UI in the browser at startup. noWeb turns
+	// off serving it at all (the sandbox exposes it on a loopback port by
+	// default; on the host opencode's own server already serves it).
+	web   bool
+	noWeb bool
 	// githubToken is RNES_GITHUB_TOKEN, read (and unset) at startup; empty means
 	// no GitHub credentials. It is only kept with -sandbox.
 	githubToken string
@@ -73,6 +78,9 @@ const defaultHost = "127.0.0.1"
 func (c cliConfig) validate() error {
 	if c.generatePolicy && c.sandboxUpdate {
 		return fmt.Errorf("-generate-policy and -sandbox-update cannot be used together")
+	}
+	if c.web && c.noWeb {
+		return fmt.Errorf("-web and -no-web cannot be used together")
 	}
 	if !c.sandbox && (c.image != "" || c.build || c.allNet || c.noInspect || len(c.skills) > 0 || len(c.skillsDirs) > 0) {
 		return fmt.Errorf("-image, -build, -all-net, -no-inspect, -skill and -skills-dir require -sandbox")
@@ -283,6 +291,8 @@ func parseFlags() (cliConfig, error) {
 	flag.BoolVar(&cfg.generatePolicy, "generate-policy", false, "write a starter .rnes/policy.txt in the current directory for -sandbox and exit without running the agent")
 	flag.BoolVar(&cfg.allNet, "all-net", false, "let the sandbox reach any public host over http(s), not just the default allow-list (your machine and LAN stay blocked apart from llama-server); requires -sandbox")
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
+	flag.BoolVar(&cfg.web, "web", false, "open opencode's web UI for the session in your browser at startup; the TUI keeps running and both share one live session")
+	flag.BoolVar(&cfg.noWeb, "no-web", false, "don't serve the session's web UI at all (with -sandbox it is exposed on a loopback port by default; on the host opencode's server always serves it, so this only saves the sandbox forward)")
 	flag.Var(&cfg.skills, "skill", "attach a host opencode skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then ~/.config/opencode/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
 	flag.Var(&cfg.skillsDirs, "skills-dir", "a host folder whose subdirectories are skills, searched before the default ones for -skill names and \"all\"; attaches nothing on its own; repeatable; requires -sandbox")
 	flag.Usage = func() { usage(os.Stderr) }
@@ -338,7 +348,7 @@ func run() error {
 		return err
 	}
 
-	h, err := harness.New(cfg.harness, harness.Options{Sandbox: cfg.sandbox, Image: cfg.image, Build: cfg.build, AllNet: cfg.allNet, NoInspect: cfg.noInspect, GitHubToken: cfg.githubToken, OpenRouterKey: cfg.openrouterKey, Skills: attached, Policy: policyBytes})
+	h, err := harness.New(cfg.harness, harness.Options{Sandbox: cfg.sandbox, Image: cfg.image, Build: cfg.build, AllNet: cfg.allNet, NoInspect: cfg.noInspect, GitHubToken: cfg.githubToken, OpenRouterKey: cfg.openrouterKey, Skills: attached, Policy: policyBytes, WebExpose: !cfg.noWeb, WebOpen: cfg.web})
 	if err != nil {
 		return err
 	}

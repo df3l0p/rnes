@@ -11,7 +11,7 @@ func TestNewReturnsRegisteredHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := h.(Opencode); !ok {
+	if _, ok := h.(*Opencode); !ok {
 		t.Errorf("expected an Opencode harness, got %T", h)
 	}
 }

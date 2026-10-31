@@ -531,3 +531,45 @@ func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 		t.Errorf("took %s to notice a failed attach (timeout %s)", took, proxyReadyTimeout)
 	}
 }
+
+func TestStartProxyNetWebPublishesAndForwardsTheWebPort(t *testing.T) {
+	logPath := fakeDockerProxy(t, nil, map[string]string{"port ": "127.0.0.1:54321\n"})
+
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, nil, "rnes-sandbox:4096")
+	if err != nil {
+		t.Fatalf("startProxyNetWeb: %v", err)
+	}
+	defer p.stop()
+
+	if p.forwardHostPort != 54321 {
+		t.Errorf("forwardHostPort = %d, want 54321", p.forwardHostPort)
+	}
+	var run string
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "run ") {
+			run = c
+		}
+	}
+	if run == "" {
+		t.Fatal("no docker run call")
+	}
+	for _, want := range []string{"-p 127.0.0.1::4097", "-forward :4097=rnes-sandbox:4096"} {
+		if !strings.Contains(run, want) {
+			t.Errorf("run args missing %q: %s", want, run)
+		}
+	}
+}
+
+func TestStartProxyNetWithoutWebDoesNotPublish(t *testing.T) {
+	logPath := fakeDockerProxy(t, nil, nil)
+	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	if err != nil {
+		t.Fatalf("startProxyNet: %v", err)
+	}
+	defer p.stop()
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "run ") && (strings.Contains(c, " -p ") || strings.Contains(c, "-forward")) {
+			t.Errorf("non-web run publishes or forwards: %s", c)
+		}
+	}
+}

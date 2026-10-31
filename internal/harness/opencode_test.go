@@ -50,7 +50,7 @@ func TestNewOpencodeUsesHomeConfigDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencode: %v", err)
 	}
-	o := h.(Opencode)
+	o := h.(*Opencode)
 	want := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
 	if o.configPath != want {
 		t.Errorf("configPath = %q, want %q", o.configPath, want)
@@ -60,13 +60,13 @@ func TestNewOpencodeUsesHomeConfigDir(t *testing.T) {
 // hostSession is a fake host for launch: HOME, an opencode that has the
 // given global config path, and none of the variables launch reads, so a
 // developer's own environment can't change what the tests see.
-func hostSession(t *testing.T) (home string, o Opencode) {
+func hostSession(t *testing.T) (home string, o *Opencode) {
 	t.Helper()
 	home = t.TempDir()
 	t.Setenv("HOME", home)
 	unsetenv(t, "OPENCODE_CONFIG_CONTENT")
 	unsetenv(t, "OPENCODE_CONFIG_DIR")
-	return home, Opencode{configPath: filepath.Join(home, ".config", "opencode", "opencode.jsonc")}
+	return home, &Opencode{configPath: filepath.Join(home, ".config", "opencode", "opencode.jsonc")}
 }
 
 // unsetenv removes key for the test and restores it afterwards. t.Setenv can

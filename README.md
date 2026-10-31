@@ -64,6 +64,8 @@ the session's generated config so it starts on it.
 | `-generate-policy` | off                                        | Write a starter `.rnes/policy.txt` in the current directory for `-sandbox`, then exit without running the agent |
 | `-all-net`  | off                                               | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
+| `-web`      | off                                               | Open the session's web UI in your browser at startup; the TUI keeps running and both share one live session |
+| `-no-web`   | off                                               | Don't serve the session's web UI at all (with `-sandbox` it is exposed on a loopback port by default) |
 | `-skill`    | none                                              | Attach a host skill to the sandbox, read-only: a name, a path to a skill directory, or `all`. Repeatable (requires `-sandbox`; see *Skills* below) |
 | `-skills-dir` | none                                            | Add a host folder of skills to search, before the default ones, for `-skill` names and `all`; attaches nothing on its own. Repeatable (requires `-sandbox`) |
 
@@ -73,6 +75,55 @@ global config, `~/.config/opencode/opencode.jsonc`) — there's no flag for it.
 and points the agent at it via that agent's own config env var
 (`OPENCODE_CONFIG` for opencode), so it works even if the agent's normal
 config resolution would otherwise pick something else up.
+
+### Web UI and diff review
+
+opencode's server always serves the web UI. `-sandbox` sessions expose it on a
+**loopback-only** port by default, so you can start working and switch to the
+browser later without restarting; on the host the TUI's own server already
+serves it, and `/web` (alias `/pair`) prints a fresh link whenever you want.
+`-web` just opens the browser at startup:
+
+```sh
+rnes            # TUI; web available later
+rnes -web       # TUI + browser opened now
+rnes -no-web    # don't expose the web UI (sandbox: no loopback forward)
+```
+
+- **Sandbox, no `-web`:** rnes prints the address and password before the TUI
+  starts (`rnes: web UI: http://127.0.0.1:<port> (password: …)`). Open it later
+  and choose "Use password". `-web` instead prints and opens a one-time pairing
+  link.
+- **Host:** `/web` in the TUI prints a fresh one-time link to the same session.
+- The TUI and the browser are two clients of **one** server, so they share the
+  same live session: a prompt sent from either appears in both. (`opencode`'s
+  sessions live in the server, and both clients subscribe to its events.)
+- The web UI includes opencode's built-in **review** panel: the diff with
+  unified/split views, a file filter, and inline **line and range comments**.
+  That is the pane with live comments; the TUI's own `/diff` is read-only.
+- **Host sessions with `-web`** serve on a loopback port rnes picks:
+
+  ```text
+  rnes: web server: http://127.0.0.1:54321 (log: …)
+  rnes: web UI: http://127.0.0.1:54321/auth/connect/<code>
+  ```
+
+- **Sandbox sessions** serve inside the container, which is on an `--internal`
+  network: Docker can't publish a port for it directly. Instead the sandbox's
+  proxy container (the one that already has a route to the host) publishes a
+  **loopback-only** port and forwards it to the sandbox's server. The browser
+  still connects to `http://127.0.0.1:<port>/…`; the container never gets an
+  inbound route and cannot use the forwarder to reach anything.
+- The pairing link is one-time and expires in 5 minutes; opening it sets a
+  cookie that lasts 30 days. `rnes` prints it either way, so if the browser
+  can't be opened automatically (remote/headless), copy the link.
+- Inside the TUI, `/web` (an alias of `/pair`) shows the pairing link too. On
+  the host it points at the same server; in the sandbox that link is
+  container-local, so use the one `rnes -web` prints instead.
+
+`-web` works with and without `-sandbox`. The server's log is kept in
+`$TMPDIR/rnes-opencode-serve-<pid>.log` on the host (and
+`/tmp/rnes-opencode-serve.log` inside the sandbox).
 
 ### Environment
 

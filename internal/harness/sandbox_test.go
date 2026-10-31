@@ -841,3 +841,43 @@ func TestSandboxRunStagesNothingWithoutSkillsOrSkillCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxWebRunStartsServerAndTUISharingIt(t *testing.T) {
+	s := &Sandbox{webExpose: true, webPassword: "secret", generated: "/tmp/config.jsonc"}
+	args := s.runArgs("rnes-1", t.TempDir(), &proxyNet{network: "rnes-net-1"}, false)
+
+	run := strings.Join(args, " ")
+	for _, want := range []string{
+		"-e OPENCODE_PASSWORD=secret",
+		"--entrypoint sh",
+		"opencode serve --hostname 0.0.0.0 --port 4096",
+		"node -e",
+		"while [ $i -lt 300 ]",
+		"exec opencode --server http://127.0.0.1:4096 .",
+	} {
+		if !strings.Contains(run, want) {
+			t.Errorf("web run args missing %q:\n%s", want, run)
+		}
+	}
+	if strings.Contains(run, "-e OPENCODE_PASSWORD= ") {
+		t.Errorf("web run args carry an empty password: %s", run)
+	}
+}
+
+func TestSandboxWithoutWebKeepsThePlainEntrypoint(t *testing.T) {
+	s := &Sandbox{generated: "/tmp/config.jsonc"}
+	run := strings.Join(s.runArgs("rnes-1", t.TempDir(), &proxyNet{network: "rnes-net-1"}, false), " ")
+	if strings.Contains(run, "--entrypoint") || strings.Contains(run, "OPENCODE_PASSWORD") {
+		t.Errorf("non-web run changed the container command: %s", run)
+	}
+}
+
+func TestSandboxWebExposureFollowsOptions(t *testing.T) {
+	if s := newSandbox(Options{Sandbox: true}, "absent.jsonc"); s.webExpose {
+		t.Error("web exposed without Options.WebExpose")
+	}
+	s := newSandbox(Options{Sandbox: true, WebExpose: true, WebOpen: true}, "absent.jsonc")
+	if !s.webExpose || !s.openWeb {
+		t.Errorf("webExpose=%v openWeb=%v, want both true", s.webExpose, s.openWeb)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,7 +52,10 @@ type proxyNet struct {
 	// error (nil for a clean exit) once it has ended.
 	attach     *exec.Cmd
 	attachDone chan error
-	stopped    bool
+	// forwardHostPort is the host loopback port published for the web
+	// forwarder, or 0 when the session has no web UI.
+	forwardHostPort int
+	stopped         bool
 }
 
 // proxyCAMount is where the proxy container mounts caVolume. It must be the
@@ -72,6 +76,15 @@ const logFollowGrace = 2 * time.Second
 // (see proxy.EncodeProviders); it requires inspect, since credentials can only
 // be injected into decrypted requests.
 func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers []byte) (*proxyNet, error) {
+	return startProxyNetWeb(image, hostIP, policy, inspect, providers, "")
+}
+
+// startProxyNetWeb is startProxyNet plus an optional TCP forward for the web
+// UI: when webTarget (a host:port the proxy can dial, e.g. the sandbox's
+// name:4096) is set, the proxy listens inside its container and rnes publishes
+// that port on host loopback. The sandbox itself stays on the internal
+// network; the forwarder only dials it.
+func startProxyNetWeb(image, hostIP string, policy []byte, inspect bool, providers []byte, webTarget string) (*proxyNet, error) {
 	if len(providers) > 0 && !inspect {
 		return nil, fmt.Errorf("credential providers need TLS interception")
 	}
@@ -121,6 +134,14 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 		"--add-host", containerHost + ":" + hostIP,
 		"-v", policyPath + ":/etc/rnes-proxy/policy.txt:ro",
 	}
+	if webTarget != "" {
+		// The proxy is on the default bridge (it joins the internal network
+		// below), so a published port works here, where it wouldn't on an
+		// --internal container. Loopback only: the web server is
+		// password-protected, but it still shouldn't be reachable from the
+		// network.
+		runArgs = append(runArgs, "-p", "127.0.0.1::"+strconv.Itoa(proxyForwardPort))
+	}
 	if inspect {
 		runArgs = append(runArgs, "-v", p.caVolume+":"+proxyCAMount)
 	}
@@ -134,6 +155,9 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 	}
 	if len(providers) > 0 {
 		runArgs = append(runArgs, "-providers-stdin")
+	}
+	if webTarget != "" {
+		runArgs = append(runArgs, "-forward", ":"+strconv.Itoa(proxyForwardPort)+"="+webTarget)
 	}
 	if out, err := exec.Command("docker", runArgs...).CombinedOutput(); err != nil {
 		p.stop()
@@ -165,8 +189,32 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 		p.stop()
 		return nil, err
 	}
+	if webTarget != "" {
+		port, err := publishedPort(p.container, proxyForwardPort)
+		if err != nil {
+			p.stop()
+			return nil, err
+		}
+		p.forwardHostPort = port
+	}
 	p.followLogs(id)
 	return p, nil
+}
+
+// publishedPort reads the host loopback port docker published for container
+// port, from `docker port` ("127.0.0.1:54321").
+func publishedPort(container string, containerPort int) (int, error) {
+	out, err := exec.Command("docker", "port", container, strconv.Itoa(containerPort)).Output()
+	if err != nil {
+		return 0, fmt.Errorf("reading the web forward's host port: %w", err)
+	}
+	line := strings.TrimSpace(strings.Split(strings.TrimSpace(string(out)), "\n")[0])
+	hostPort := line[strings.LastIndex(line, ":")+1:]
+	port, err := strconv.Atoi(hostPort)
+	if err != nil {
+		return 0, fmt.Errorf("reading the web forward's host port from %q: %w", line, err)
+	}
+	return port, nil
 }
 
 // followLogs writes the proxy's log to $TMPDIR/rnes-proxy-<id>.log, as it
