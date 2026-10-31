@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,6 +22,40 @@ func TestValidateRejectsSandboxOnlyFlagsWithoutSandbox(t *testing.T) {
 	for _, cfg := range []cliConfig{{}, {sandbox: true}, {sandboxUpdate: true}, {sandbox: true, image: "x", build: true, allNet: true, noInspect: true}} {
 		if err := cfg.validate(); err != nil {
 			t.Errorf("validate(%+v) = %v, want nil", cfg, err)
+		}
+	}
+}
+
+func TestValidateWorktreeNeedsANameAndIsNotForSandboxUpdate(t *testing.T) {
+	if err := (cliConfig{worktreeSet: true}).validate(); err == nil || !strings.Contains(err.Error(), "-worktree") {
+		t.Errorf("validate(-worktree with no name) = %v, want an error naming -worktree", err)
+	}
+	if err := (cliConfig{worktree: "feature", worktreeSet: true}).validate(); err != nil {
+		t.Errorf("validate(-worktree feature) = %v", err)
+	}
+	if err := (cliConfig{worktree: "feature", worktreeSet: true, sandboxUpdate: true}).validate(); err == nil || !strings.Contains(err.Error(), "-sandbox-update") {
+		t.Errorf("validate(-worktree with -sandbox-update) = %v, want a conflict", err)
+	}
+}
+
+func TestParseFlagsAcceptsWorktreeAndDocumentsIt(t *testing.T) {
+	oldFlags, oldArgs, oldUsage := flag.CommandLine, os.Args, flag.Usage
+	t.Cleanup(func() { flag.CommandLine, os.Args, flag.Usage = oldFlags, oldArgs, oldUsage })
+	flag.CommandLine = flag.NewFlagSet("rnes", flag.ContinueOnError)
+	os.Args = []string{"rnes", "-worktree", "feature"}
+
+	cfg, err := parseFlags()
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if cfg.worktree != "feature" || !cfg.worktreeSet {
+		t.Errorf("worktree = %q (set=%v), want feature (set=true)", cfg.worktree, cfg.worktreeSet)
+	}
+	var buf bytes.Buffer
+	usage(&buf)
+	for _, want := range []string{"-worktree", ".worktree/<name>", "-sandbox"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("usage is missing %q:\n%s", want, buf.String())
 		}
 	}
 }

@@ -231,6 +231,50 @@ func TestSandboxRunArgs(t *testing.T) {
 	}
 }
 
+func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
+	repo := t.TempDir()
+	common := filepath.Join(repo, ".git")
+	gitDir := filepath.Join(common, "worktrees", "wt")
+	wt := filepath.Join(repo, ".worktree", "wt")
+	for _, d := range []string{gitDir, wt} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := strings.Join(gitMounts(wt), " ")
+	want := "--mount " + bindMount(common, common, false)
+	if got != want {
+		t.Errorf("gitMounts = %q, want %q", got, want)
+	}
+
+	// A relative .git file is resolved from the container's workdir, not the
+	// host path of the worktree.
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: ../../.git/worktrees/wt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got = strings.Join(gitMounts(wt), " ")
+	want = "--mount " + bindMount(common, "/.git", false)
+	if got != want {
+		t.Errorf("gitMounts(relative) = %q, want %q", got, want)
+	}
+
+	// A normal checkout's .git is inside the mounted workdir already.
+	plain := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(plain, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitMounts(plain); len(got) != 0 {
+		t.Errorf("gitMounts(normal checkout) = %v, want none", got)
+	}
+}
+
 func TestSandboxBindHost(t *testing.T) {
 	const (
 		infoPrefix   = "info --format"
@@ -491,11 +535,13 @@ func TestRunArgsGiveTheSandboxOnlyThePlaceholder(t *testing.T) {
 		"-e GH_TOKEN=rnes_placeholder_abc",
 		"-e GH_NO_UPDATE_NOTIFIER=1",
 		"-e GIT_TERMINAL_PROMPT=0",
-		"-e GIT_CONFIG_COUNT=2",
-		"-e GIT_CONFIG_KEY_0=credential.https://github.com.helper",
-		"-e GIT_CONFIG_VALUE_0= ",
+		"-e GIT_CONFIG_COUNT=3",
+		"-e GIT_CONFIG_KEY_0=safe.directory",
+		"-e GIT_CONFIG_VALUE_0=/workspace",
 		"-e GIT_CONFIG_KEY_1=credential.https://github.com.helper",
-		`-e GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f`,
+		"-e GIT_CONFIG_VALUE_1= ",
+		"-e GIT_CONFIG_KEY_2=credential.https://github.com.helper",
+		`-e GIT_CONFIG_VALUE_2=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("run args missing %q:\n%s", want, joined)
@@ -503,12 +549,21 @@ func TestRunArgsGiveTheSandboxOnlyThePlaceholder(t *testing.T) {
 	}
 }
 
-func TestRunArgsWithoutAGitHubTokenSetNoGitHubEnv(t *testing.T) {
+func TestRunArgsWithoutAGitHubTokenTrustTheWorkspaceButSetNoGitHubEnv(t *testing.T) {
 	s := newSandbox(Options{Sandbox: true}, "")
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
 	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
 	joined := strings.Join(s.runArgs("rnes-1-aa", "/work/proj", pn, false), " ")
-	for _, bad := range []string{"GH_TOKEN", "GIT_CONFIG_COUNT"} {
+	for _, want := range []string{
+		"-e GIT_CONFIG_COUNT=1",
+		"-e GIT_CONFIG_KEY_0=safe.directory",
+		"-e GIT_CONFIG_VALUE_0=/workspace",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("run args missing %q:\n%s", want, joined)
+		}
+	}
+	for _, bad := range []string{"GH_TOKEN", "credential.https://github.com.helper"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("run args mention %s without a token: %s", bad, joined)
 		}

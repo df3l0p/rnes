@@ -22,6 +22,9 @@
 # Claude Code local session state
 .claude/
 
+# rnes -worktree worktrees
+.worktree/
+
 # Local config / secrets
 .env
 .env.local

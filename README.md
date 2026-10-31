@@ -34,6 +34,7 @@ its own provider, and only the sandbox's egress proxy runs alongside it.
   `llama` CLI (`llama serve`) or the older standalone `llama-server` binary. On
   macOS, `brew install llama.cpp` provides both. Not needed for
   `-harness agy`.
+- `git` on `PATH` for `-worktree`.
 
 ## Install
 
@@ -69,6 +70,7 @@ the session's generated config so it starts on it.
 | `-port`     | `8080`                                            | llama-server port; rejected for harnesses that don't use llama-server |
 | `-harness`  | `opencode`                                        | Coding agent to run: `opencode` or `agy` (see *Antigravity* below) |
 | `-sandbox`  | off                                               | Run the agent in a Docker container (see below)  |
+| `-worktree` | none                                              | Create (or reuse) the linked git worktree `<repository>/.worktree/<name>` and run the session there; works on the host and with `-sandbox` (see *Worktrees* below) |
 | `-image`    | `default`                                         | Bundled sandbox image to use (see below; requires `-sandbox`) |
 | `-build`    | off                                               | Rebuild the sandbox image even if it exists (requires `-sandbox`) |
 | `-sandbox-update` | off                                         | Rebuild the sandbox images from scratch, then exit without running the agent (implies `-sandbox` and `-build`). Without `-harness`, rebuilds every harness's images; with it, only that harness's (and, without `-image`, every image on its base) |
@@ -88,6 +90,37 @@ rnes -sandbox -harness agy -- --version
 rnes -sandbox -harness agy -- --continue
 rnes -sandbox -harness opencode -- --continue
 ```
+
+### Worktrees
+
+`-worktree <name>` runs a session in its own linked git worktree instead of
+the current checkout:
+
+```sh
+cd your-project
+rnes -worktree feature-01
+rnes -sandbox -worktree feature-01
+```
+
+It creates `<repository>/.worktree/feature-01` (on a new `feature-01` branch,
+or on an existing branch of that name) from the repository's current `HEAD`,
+then treats that directory as the project for the rest of the session: the
+harness starts there, `-skill` paths and `.rnes` policy are resolved there, and
+`-sandbox` mounts it at `/workspace`. Running the same command again reuses the
+worktree. The name must be one path component and a valid git branch name;
+`-worktree` requires `git` and can't be combined with `-sandbox-update`.
+
+A linked worktree's `.git` is a *file* pointing outside the worktree (at the
+repository's shared `.git/worktrees/<name>`), so mounting only the worktree
+would leave `git` unable to find the repository. To keep git working in the
+sandbox, rnes also mounts that shared git directory read-write at the path the
+`.git` file names (or, for a worktree made with `--relative-paths`, at the path
+it resolves to from `/workspace`), so git can update the worktree's index, HEAD
+and refs. The rest of the repository is not mounted.
+
+The worktree and its branch are left in place when the session ends, so the
+next `-worktree <name>` continues where it stopped. Remove one with
+`git worktree remove .worktree/<name>` (and `git branch -d <name>`).
 
 Each harness owns its own config path internally (opencode's is its default
 global config, `~/.config/opencode/opencode.jsonc`) — there's no flag for it.
@@ -178,7 +211,10 @@ is bind-mounted at `/workspace` (with `<cwd>/.rnes` mounted read-only at
 `/workspace/.rnes`), and the container runs as your uid/gid with all Linux
 capabilities dropped (`--cap-drop=ALL`) and `no-new-privileges` enabled so
 files it writes keep your ownership and SUID/capability elevation is disabled.
-Only `docker` is needed on the host (not the agent).
+Only `docker` is needed on the host (not the agent). The mounted workspace is
+trusted by git (`safe.directory=/workspace`): Docker Desktop can report the
+mount root as owned by another user, which git otherwise rejects as "dubious
+ownership".
 
 - **Config:** for the `opencode` harness, `rnes` generates a private copy of
   your opencode config with the `llama-cpp` provider's `baseURL` rewritten for
@@ -238,7 +274,8 @@ Only `docker` is needed on the host (not the agent).
   `HTTP_PROXY`/`HTTPS_PROXY`. By default, the proxy only allows the session's
   model server plus `registry.npmjs.org`, `proxy.golang.org`, `sum.golang.org`,
   `pypi.org`, `files.pythonhosted.org`, `crates.io`, `static.crates.io`,
-  `github.com`, `api.github.com` and `models.dev` (all over https) and blocks
+  `github.com`, `api.github.com`, `models.dev`, `models.opencode.ai` and
+  `opencode.ai` (all over https) and blocks
   everything else, including non-HTTP protocols such as git over ssh. Those
   built-in defaults live in `internal/harness/policy.txt` (one `host:port` per
   line).

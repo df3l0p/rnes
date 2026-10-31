@@ -184,6 +184,7 @@ func TestDefaultPolicyParses(t *testing.T) {
 	}
 	for _, want := range []string{
 		"registry.npmjs.org:443", "github.com:443", "models.dev:443",
+		"models.opencode.ai:443", "opencode.ai:443",
 		"api.github.com:443",
 		"proxy.golang.org:443", "sum.golang.org:443",
 		"pypi.org:443", "files.pythonhosted.org:443",
@@ -224,7 +225,7 @@ func TestSandboxPolicyIsDefaultsPlusModelServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParsePolicy(s.policy()): %v", err)
 	}
-	for _, want := range []string{"host.docker.internal:8080", "registry.npmjs.org:443", "github.com:443", "models.dev:443"} {
+	for _, want := range []string{"host.docker.internal:8080", "registry.npmjs.org:443", "github.com:443", "models.dev:443", "models.opencode.ai:443", "opencode.ai:443"} {
 		if !pol.Allows(want) {
 			t.Errorf("session policy doesn't allow %s", want)
 		}

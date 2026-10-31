@@ -20,6 +20,7 @@ import (
 	"github.com/df3l0p/rnes/internal/llamaserver"
 	"github.com/df3l0p/rnes/internal/proxy"
 	"github.com/df3l0p/rnes/internal/skills"
+	"github.com/df3l0p/rnes/internal/worktree"
 )
 
 const providerKey = "llama-cpp"
@@ -39,8 +40,14 @@ type cliConfig struct {
 	// -sandbox-update to scope a rebuild to one harness instead of all of them).
 	harnessSet bool
 	sandbox    bool
-	image      string
-	build      bool
+	// worktree, when set, is the name of the linked git worktree to create (or
+	// reuse) under <repository>/.worktree and run the session in. worktreeSet
+	// reports whether -worktree was passed, so an explicit empty name is an
+	// error rather than "no worktree".
+	worktree    string
+	worktreeSet bool
+	image       string
+	build       bool
 	// args are the trailing command-line arguments after "--", forwarded to
 	// the harness executable.
 	args []string
@@ -93,6 +100,12 @@ func (c cliConfig) validate() error {
 	}
 	if c.web && c.harness != "opencode" {
 		return fmt.Errorf("-web requires -harness opencode")
+	}
+	if c.worktreeSet && c.worktree == "" {
+		return fmt.Errorf("-worktree needs a name")
+	}
+	if c.worktree != "" && c.sandboxUpdate {
+		return fmt.Errorf("-worktree and -sandbox-update cannot be used together")
 	}
 	if !c.sandbox && (c.image != "" || c.build || c.allNet || c.noInspect || len(c.skills) > 0 || len(c.skillsDirs) > 0) {
 		return fmt.Errorf("-image, -build, -all-net, -no-inspect, -skill and -skills-dir require -sandbox")
@@ -434,6 +447,7 @@ func parseFlags() (cliConfig, error) {
 	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
 	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")
 	flag.BoolVar(&cfg.sandbox, "sandbox", false, "run the harness in a Docker container that mounts the current directory")
+	flag.StringVar(&cfg.worktree, "worktree", "", "create (or reuse) the linked git worktree <repository>/.worktree/<name> and run the session there; works on the host and with -sandbox")
 	flag.StringVar(&cfg.image, "image", "", "bundled sandbox image to use (default "+images.Default+"; available: "+strings.Join(images.Names(), ", ")+"); requires -sandbox")
 	flag.BoolVar(&cfg.build, "build", false, "rebuild the sandbox image from scratch, without docker's layer cache, even if it exists (it is built when missing, never pulled); requires -sandbox")
 	flag.BoolVar(&cfg.sandboxUpdate, "sandbox-update", false, "rebuild the sandbox images (every bundled one for every harness, unless -harness selects one or -image selects an image; plus each base and the proxy image) from scratch, without docker's layer cache, so it picks up new packages and a newer agent, then exit without running the agent; implies -sandbox")
@@ -456,6 +470,8 @@ func parseFlags() (cliConfig, error) {
 			cfg.portSet = true
 		case "harness":
 			cfg.harnessSet = true
+		case "worktree":
+			cfg.worktreeSet = true
 		}
 	})
 	cfg.args = flag.Args()
@@ -489,6 +505,17 @@ func run() error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolving current directory: %w", err)
+	}
+	// A worktree session runs in the linked worktree, not where rnes was
+	// started: everything below (skills, .rnes policy, the harness, the
+	// sandbox mount) then treats it as the project directory.
+	if cfg.worktree != "" {
+		created, err := worktree.Create(cwd, cfg.worktree)
+		if err != nil {
+			return err
+		}
+		cwd = created
+		fmt.Fprintf(os.Stderr, "rnes: worktree: %s\n", cwd)
 	}
 	if cfg.generatePolicy {
 		if _, err := harness.GeneratePolicy(cwd); err != nil {

@@ -15,8 +15,10 @@ registry.npmjs.org:443
 # GitHub: git over https, and the API that gh uses
 github.com:443
 api.github.com:443
-# the model catalog opencode fetches at startup
+# opencode's model catalog and website, fetched at startup
 models.dev:443
+models.opencode.ai:443
+opencode.ai:443
 
 # Common package registries
 proxy.golang.org:443
