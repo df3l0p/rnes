@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -114,6 +115,54 @@ func (c cliConfig) ignoresOpenRouterKey() bool {
 	}
 	needsModelServer, err := harness.NeedsModelServerName(c.harness)
 	return err == nil && !needsModelServer
+}
+
+// checkTrailingArgs rejects positional arguments that aren't behind the "--"
+// passthrough: flag parsing stops at the first non-flag argument, so a stray
+// positional would silently swallow the rest of the line into the agent's
+// arguments instead of being parsed as rnes flags.
+func checkTrailingArgs(argv, args []string) error {
+	if len(args) == 0 || slices.Contains(argv, "--") {
+		return nil
+	}
+	return fmt.Errorf("unexpected argument %q: put arguments for the agent after \"--\"", args[0])
+}
+
+// newSession resolves everything run() needs before any server or container
+// starts, in one order: flags that only model-server sessions accept are
+// checked and a cloud harness's unused OpenRouter key is dropped first (so
+// nothing downstream sees credentials or flags that only a model-server
+// session would use), then skills and the sandbox policy (so a bad -skill or
+// .rnes/policy.txt fails with nothing left behind), then the harness itself.
+// Without -sandbox the harness reports its own error (e.g. agy requires it).
+// The returned cfg carries any adjustments (the dropped OpenRouter key).
+func newSession(cfg cliConfig, home, cwd string, stderr io.Writer) (cliConfig, harness.Harness, []skills.Skill, error) {
+	if cfg.sandbox {
+		needsModelServer, err := harness.NeedsModelServerName(cfg.harness)
+		if err != nil {
+			return cfg, nil, nil, err
+		}
+		if err := checkModelServerFlags(cfg, needsModelServer); err != nil {
+			return cfg, nil, nil, err
+		}
+		if !needsModelServer && cfg.openrouterKey != "" {
+			fmt.Fprintf(stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
+			cfg.openrouterKey = ""
+		}
+	}
+	attached, err := resolveSkills(cfg, home, cwd, stderr)
+	if err != nil {
+		return cfg, nil, nil, err
+	}
+	policyBytes, err := resolvePolicy(cfg, cwd, stderr)
+	if err != nil {
+		return cfg, nil, nil, err
+	}
+	h, err := harness.New(cfg.harness, harnessOptions(cfg, attached, policyBytes))
+	if err != nil {
+		return cfg, nil, nil, err
+	}
+	return cfg, h, attached, nil
 }
 
 // checkModelServerFlags rejects an explicit -host or -port when the selected
@@ -395,6 +444,9 @@ func parseFlags() (cliConfig, error) {
 		}
 	})
 	cfg.args = flag.Args()
+	if err := checkTrailingArgs(os.Args[1:], cfg.args); err != nil {
+		return cliConfig{}, err
+	}
 	cfg.applyImplications()
 	cfg.dropSkillsForUpdate()
 	cfg.githubToken = cfg.sessionCredential("RNES_GITHUB_TOKEN", githubTokenFromEnv())
@@ -430,41 +482,15 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "rnes: wrote %s\n", harness.ProjectPolicyRel)
 		return nil
 	}
-	// A harness backed by its own cloud/subscription service (agy) doesn't use
-	// llama-server: reject -host/-port and drop an OpenRouter key before
-	// resolving skills, so nothing downstream sees credentials or flags that
-	// only a model-server session would use. Without -sandbox the harness is
-	// constructed below and reports its own error (e.g. agy requires it).
-	if cfg.sandbox {
-		needsModelServer, err := harness.NeedsModelServerName(cfg.harness)
-		if err != nil {
-			return err
-		}
-		if err := checkModelServerFlags(cfg, needsModelServer); err != nil {
-			return err
-		}
-		if !needsModelServer && cfg.openrouterKey != "" {
-			fmt.Fprintf(os.Stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
-			cfg.openrouterKey = ""
-		}
-	}
-	// Before anything starts, so a bad -skill or .rnes/policy.txt fails with
-	// no server or container left behind.
-	attached, err := resolveSkills(cfg, home, cwd, os.Stderr)
-	if err != nil {
-		return err
-	}
-	policyBytes, err := resolvePolicy(cfg, cwd, os.Stderr)
-	if err != nil {
-		return err
-	}
-
-	h, err := harness.New(cfg.harness, harnessOptions(cfg, attached, policyBytes))
+	cfg, h, attached, err := newSession(cfg, home, cwd, os.Stderr)
 	if err != nil {
 		return err
 	}
 	if vol := harness.AuthVolume(h, cwd); vol != "" && !cfg.sandboxUpdate {
 		fmt.Fprintf(os.Stderr, "rnes: %s auth: persisted for this project in Docker volume %s (live OAuth inside the sandbox; list with 'docker volume ls --filter label=rnes.auth', remove with 'docker volume rm %s')\n", cfg.harness, vol, vol)
+		if cfg.harness == "agy" {
+			fmt.Fprintf(os.Stderr, "rnes: if agy asks you to sign in: choose Google OAuth, open the URL it prints in a browser on this machine, and paste the authorization code back before its timeout; the login then persists in the volume for this project\n")
+		}
 		if cfg.allNet {
 			fmt.Fprintf(os.Stderr, "rnes: warning: -all-net lets the sandbox reach any public host while holding your live %s OAuth session in %s\n", cfg.harness, vol)
 		}

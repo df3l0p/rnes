@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,6 +384,79 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "example.com:443 (no-inspect)") || !strings.Contains(buf.String(), "github.com:443") {
 		t.Errorf("startup line = %q, want example.com:443 (no-inspect) and plain github.com:443", buf.String())
+	}
+}
+
+func TestCheckTrailingArgsRejectsPositionalsOutsideThePassthrough(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		args []string
+		want string // empty means no error
+	}{
+		{"no arguments", []string{"rnes", "-sandbox"}, nil, ""},
+		{"args behind the terminator", []string{"rnes", "-sandbox", "--", "--version"}, []string{"--version"}, ""},
+		{"bare terminator", []string{"rnes", "--"}, nil, ""},
+		{"positional before the terminator is an error", []string{"rnes", "proj", "-sandbox"}, []string{"proj", "-sandbox"}, `unexpected argument "proj"`},
+		{"positional without a terminator is an error", []string{"rnes", "--version"}, []string{"--version"}, `unexpected argument "--version"`},
+	} {
+		err := checkTrailingArgs(tc.argv, tc.args)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: err = %v, want nil", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "--") {
+			t.Errorf("%s: err = %v, want one containing %q and \"--\"", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestNewSessionDropsTheOpenRouterKeyForACloudHarness(t *testing.T) {
+	// The drop must happen before anything downstream runs, so the session
+	// never sees a credential that only a model-server harness would use.
+	var buf bytes.Buffer
+	cfg, _, _, err := newSession(cliConfig{sandbox: true, harness: "agy", openrouterKey: "sk-or-x"}, t.TempDir(), t.TempDir(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.openrouterKey != "" {
+		t.Errorf("openrouterKey = %q, want it dropped", cfg.openrouterKey)
+	}
+	if !strings.Contains(buf.String(), "RNES_OPENROUTER_API_KEY is ignored") {
+		t.Errorf("output = %q, want the ignore note", buf.String())
+	}
+}
+
+func TestNewSessionRejectsModelServerFlagsForACloudHarness(t *testing.T) {
+	_, _, _, err := newSession(cliConfig{sandbox: true, harness: "agy", hostSet: true, portSet: true}, t.TempDir(), t.TempDir(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-host") {
+		t.Fatalf("newSession(agy, -host -port) = %v, want a -host error", err)
+	}
+}
+
+func TestNewSessionKeepsTheKeyAndFlagsForAModelServerHarness(t *testing.T) {
+	var buf bytes.Buffer
+	cfg, h, _, err := newSession(cliConfig{sandbox: true, harness: "opencode", openrouterKey: "sk-or-x"}, t.TempDir(), t.TempDir(), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.openrouterKey != "sk-or-x" {
+		t.Errorf("openrouterKey = %q, want it kept", cfg.openrouterKey)
+	}
+	if _, ok := h.(*harness.Sandbox); !ok {
+		t.Errorf("harness = %T, want *harness.Sandbox", h)
+	}
+	if strings.Contains(buf.String(), "ignored") {
+		t.Errorf("output = %q, want no ignore note", buf.String())
+	}
+}
+
+func TestNewSessionRejectsAnUnknownHarness(t *testing.T) {
+	_, _, _, err := newSession(cliConfig{sandbox: true, harness: "nope"}, t.TempDir(), t.TempDir(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unknown harness") {
+		t.Fatalf("newSession(nope) = %v, want an unknown-harness error", err)
 	}
 }
 

@@ -23,10 +23,15 @@ OAuth subscription, on top of a generalized multi-harness sandbox layer that
   internal `sandboxProfile` shared by opencode and agy.
 - **agy harness:** requires `-sandbox`; never starts `llama-server`; rejects
   explicit `-host`/`-port`; forwards `-model` as `--model` only when given;
-  forwards `--` arguments; ignores `RNES_OPENROUTER_API_KEY` with a note.
-  OAuth/session state lives in a per-project Docker volume
+  forwards `--` arguments; rejects a project policy that inspects the hosts agy
+  needs tunnelled (`checkExtraPolicy`); ignores `RNES_OPENROUTER_API_KEY` with a
+  note. OAuth/session state lives in a per-project Docker volume
   `rnes-auth-agy-<sha256(realpath(cwd))[:12]>` labeled `rnes.auth=agy`, mounted
-  at `/home/rnes/.gemini/antigravity-cli`. Attached skills are staged read-only
+  read-write at agy's two credential locations, `/home/rnes/.gemini/antigravity-cli`
+  (`antigravity-oauth-token`, `settings.json`, `brain/`) and
+  `/home/rnes/.config/antigravity` (`credential-user-scope`) — agy's container
+  file storage reads both at startup, and missing the second one made every
+  session ask for sign-in again. Attached skills are staged read-only
   under the sibling `~/.gemini/config/skills`.
 - **CLI:** dynamic `-harness` help, `[-- harness-args...]` usage, startup
   auth-volume notice (plus a warning with `-all-net`), `(no-inspect)` markers in
@@ -56,13 +61,23 @@ OAuth subscription, on top of a generalized multi-harness sandbox layer that
 - The smoke test created this project's `rnes-auth-agy-<hash>` volume. It holds
   no credentials until a real `rnes -sandbox -harness agy` session completes the
   Google OAuth flow; state then persists for this project across runs.
+- Verified live (in-container, no proxy): agy's unauthenticated headless flow
+  prints an `accounts.google.com` URL with
+  `redirect_uri=https://antigravity.google/oauth-callback` and asks for the
+  authorization code to be pasted back (60s timeout), so OAuth completes
+  without a browser or loopback port inside the container; both credential
+  files (`~/.gemini/antigravity-cli/antigravity-oauth-token` and
+  `~/.config/antigravity/credential-user-scope`) are opened at startup, which
+  is how the second mount target was identified.
 - List volumes with `docker volume ls --filter label=rnes.auth`; remove one
   (signing that project out and deleting its transcripts) with
   `docker volume rm rnes-auth-agy-<hash>`.
 
 ## Follow-ups
 
-- Optional: complete an interactive OAuth login once to confirm the live
-  Google/Antigravity endpoints end to end.
+- Complete one interactive OAuth login end to end through the rnes proxy (the
+  in-container flow was verified only outside the proxy; the Google endpoints
+  are `no-inspect` allow-list entries) and confirm a second session starts
+  signed in from the volume.
 - Future harnesses: add `images/base-<name>.Dockerfile` and register a
   `sandboxProfile` in `internal/harness`.

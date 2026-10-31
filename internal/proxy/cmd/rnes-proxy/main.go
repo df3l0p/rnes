@@ -33,35 +33,23 @@ func main() {
 	}
 	srv := &proxy.Server{Policy: pol}
 	if *intercept {
-		hosts := pol.DNSHosts()
-		if len(hosts) > 0 {
-			ca, err := proxy.NewCA(hosts)
-			if err != nil {
-				log.Fatalf("rnes-proxy: %v", err)
-			}
-			bundle, err := ca.Bundle(*systemRoots)
-			if err != nil {
-				log.Fatalf("rnes-proxy: %v", err)
-			}
-			// World-readable: the sandbox reads it as another user, and it holds
-			// only public certificates.
-			if err := os.WriteFile(*caOut, bundle, 0o644); err != nil {
-				log.Fatalf("rnes-proxy: writing the trust bundle: %v", err)
-			}
-			fmt.Printf("rnes-proxy: intercepting %v; trust bundle written to %s\n", hosts, *caOut)
-			srv.CA = ca
-		} else {
+		ca, bundle, err := proxy.TrustBundle(pol, *systemRoots)
+		if err != nil {
+			log.Fatalf("rnes-proxy: %v", err)
+		}
+		// World-readable: the sandbox reads it as another user, and it holds
+		// only public certificates.
+		if err := os.WriteFile(*caOut, bundle, 0o644); err != nil {
+			log.Fatalf("rnes-proxy: writing the trust bundle: %v", err)
+		}
+		if ca == nil {
 			// Every allowed host skips inspection (e.g. an empty .rnes/policy.txt
-			// with a cloud harness): write the system roots alone so the sandbox's
-			// SSL_CERT_FILE bundle still validates real upstream certificates.
-			roots, err := os.ReadFile(*systemRoots)
-			if err != nil {
-				log.Fatalf("rnes-proxy: reading system roots: %v", err)
-			}
-			if err := os.WriteFile(*caOut, roots, 0o644); err != nil {
-				log.Fatalf("rnes-proxy: writing the trust bundle: %v", err)
-			}
+			// with a cloud harness): the bundle is the system roots alone, so the
+			// sandbox's SSL_CERT_FILE still validates real upstream certificates.
 			fmt.Printf("rnes-proxy: no hosts to intercept; system roots written to %s\n", *caOut)
+		} else {
+			fmt.Printf("rnes-proxy: intercepting %v; trust bundle written to %s\n", pol.DNSHosts(), *caOut)
+			srv.CA = ca
 		}
 		if *providersStdin {
 			inj, err := proxy.InjectorFromStdin(bufio.NewReader(os.Stdin), pol, log.Printf)

@@ -24,6 +24,29 @@ func TestNewAgyRequiresSandbox(t *testing.T) {
 	}
 }
 
+func TestNewAgyRejectsAPolicyThatInspectsItsNoInspectEndpoints(t *testing.T) {
+	// agy needs its Google endpoints tunnelled unread; a project policy that
+	// lists one of them for TLS inspection can't be honored, so constructing
+	// the harness must fail rather than silently downgrade the user's entry.
+	_, err := New("agy", Options{Sandbox: true, Policy: []byte("github.com:443\nwww.googleapis.com:443\n")})
+	if err == nil || !strings.Contains(err.Error(), "www.googleapis.com:443") || !strings.Contains(err.Error(), ProjectPolicyRel) {
+		t.Fatalf("New(agy, inspecting policy) = %v, want an error naming the host and %s", err, ProjectPolicyRel)
+	}
+
+	// Marking the entry no-inspect in the project policy resolves the conflict.
+	if _, err := New("agy", Options{Sandbox: true, Policy: []byte("no-inspect www.googleapis.com:443\n")}); err != nil {
+		t.Fatalf("New(agy, no-inspect policy): %v", err)
+	}
+	// The built-in defaults name none of agy's endpoints, so they never conflict.
+	if _, err := New("agy", Options{Sandbox: true}); err != nil {
+		t.Fatalf("New(agy, default policy): %v", err)
+	}
+	// Neither does an empty one.
+	if _, err := New("agy", Options{Sandbox: true, Policy: []byte{}}); err != nil {
+		t.Fatalf("New(agy, empty policy): %v", err)
+	}
+}
+
 func TestAgyAuthVolumeIsPerProjectAndCanonical(t *testing.T) {
 	root := t.TempDir()
 	projA := filepath.Join(root, "proj-a")
@@ -77,6 +100,11 @@ func TestAgyPolicyMarksGoogleEndpointsNoInspectWhileKeepingGitHubInspected(t *te
 		"antigravity-pa.googleapis.com:443",
 		"antigravity-unleash.goog:443",
 		"cloudcode-pa.googleapis.com:443",
+		"daily-cloudcode-pa.googleapis.com:443",
+		"autopush-cloudcode-pa.sandbox.googleapis.com:443",
+		"preprod-daily-cloudcode-pa.sandbox.googleapis.com:443",
+		"aicode.googleapis.com:443",
+		"autopush-aicode.sandbox.googleapis.com:443",
 		"generativelanguage.googleapis.com:443",
 		"businessaicode.googleapis.com:443",
 		"aiplatform.googleapis.com:443",
@@ -120,6 +148,7 @@ func TestAgyRunArgsMountsAuthVolumeSkillsSiblingAndForwardsModelAndArgs(t *testi
 	joined := strings.Join(defaultArgs, " ")
 	for _, want := range []string{
 		"-v " + vol + ":/home/rnes/.gemini/antigravity-cli",
+		"-v " + vol + ":/home/rnes/.config/antigravity",
 		"--mount type=bind,source=" + filepath.Join(workdir, ".rnes") + ",target=/workspace/.rnes,readonly",
 		"-v rnes-ca-1:/etc/rnes-ca:ro",
 		"-e SSL_CERT_FILE=/etc/rnes-ca/ca.pem",
@@ -152,6 +181,7 @@ func TestAgyRunArgsMountsAuthVolumeSkillsSiblingAndForwardsModelAndArgs(t *testi
 	customJoined := strings.Join(sCustom.runArgsForModel("rnes-2", workdir, pn, false, "gemini-2.5-pro"), " ")
 	for _, want := range []string{
 		"-v " + vol + ":/home/rnes/.gemini/antigravity-cli",
+		"-v " + vol + ":/home/rnes/.config/antigravity",
 		"--mount type=bind,source=/tmp/staged-agy-config,target=/home/rnes/.gemini/config ",
 		"--mount type=bind,source=/host/skills/my-skill,target=/home/rnes/.gemini/config/skills/my-skill,readonly ",
 		"rnes-sandbox-default:agy1 --model gemini-2.5-pro --continue --mode plan",
@@ -197,6 +227,9 @@ func TestAgyRunCreatesLabeledAuthVolumeWithoutRequiringConfigure(t *testing.T) {
 			sawRun = true
 			if !strings.Contains(c, "-v "+vol+":/home/rnes/.gemini/antigravity-cli") {
 				t.Errorf("run call missing auth volume mount: %s", c)
+			}
+			if !strings.Contains(c, "-v "+vol+":/home/rnes/.config/antigravity") {
+				t.Errorf("run call missing credential volume mount: %s", c)
 			}
 			if !strings.Contains(c, "source="+skillDir+",target=/home/rnes/.gemini/config/skills/attached,readonly") {
 				t.Errorf("run call missing read-only skill mount: %s", c)

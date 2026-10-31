@@ -430,9 +430,18 @@ uid/gid, like the rest of the sandbox.
 **Auth and persistence.** Your host `~/.gemini` is never mounted into the
 sandbox. Instead, each project gets its own Docker named volume,
 `rnes-auth-agy-<sha256(realpath(cwd))[:12]>` (label `rnes.auth=agy`), mounted
-at `/home/rnes/.gemini/antigravity-cli`. It holds agy's OAuth credentials,
-`settings.json` and `brain/` transcripts, and is kept across runs:
+read-write at agy's two credential locations, `/home/rnes/.gemini/antigravity-cli`
+(`antigravity-oauth-token`, `settings.json`, `brain/` transcripts) and
+`/home/rnes/.config/antigravity` (`credential-user-scope`). It is kept across
+runs:
 
+- **First session:** agy asks you to sign in. Choose *Google OAuth*, open the
+  URL it prints in a browser on this machine, sign in, and paste the
+  authorization code back into agy before its timeout. The login is stored in
+  the volume, so later sessions in the same project start signed in — no
+  browser round-trip again. (agy's redirect goes to
+  `antigravity.google/oauth-callback` and you paste the code, so the flow
+  works even though the container has no browser.)
 - Different projects never see each other's session state or transcripts.
 - `rnes` prints the volume name at startup.
 - List them with `docker volume ls --filter label=rnes.auth`.

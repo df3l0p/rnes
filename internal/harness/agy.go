@@ -11,6 +11,12 @@ const (
 	// containerAgyAuthDir is where agy stores its OAuth credentials,
 	// settings.json, and brain/ transcripts inside the sandbox.
 	containerAgyAuthDir = containerHome + "/.gemini/antigravity-cli"
+	// containerAgyCredentialDir is agy's other credential location
+	// (credential-user-scope, read at startup alongside
+	// containerAgyAuthDir/antigravity-oauth-token); without it being
+	// persisted, login state is lost with the container's ephemeral HOME and
+	// every session asks for sign-in again.
+	containerAgyCredentialDir = containerHome + "/.config/antigravity"
 	// containerAgyConfigHome is where agy reads global skills
 	// (<containerAgyConfigHome>/skills/<name>), kept as a sibling of
 	// containerAgyAuthDir so skills mounts never touch the auth volume.
@@ -20,7 +26,11 @@ const (
 // agyExtraPolicy lists the Google OAuth and Antigravity endpoints agy reaches
 // directly over HTTP/2 and gRPC. They are marked no-inspect so TLS is
 // tunnelled untouched while the rest of the policy (e.g. github.com) remains
-// TLS-inspected and credential-injected.
+// TLS-inspected and credential-injected. The *-cloudcode-pa and aicode
+// families come in channel variants (prod, daily, autopush/preprod sandbox);
+// agy picks per build/channel — e.g. 1.4.10 runs its eligibility/Code-Assist
+// calls against daily-cloudcode-pa.googleapis.com — so all variants are
+// allowed, not just the prod host.
 const agyExtraPolicy = `# Google Antigravity OAuth & API endpoints (HTTP/2 & gRPC passthrough)
 no-inspect accounts.google.com:443
 no-inspect oauth2.googleapis.com:443
@@ -30,6 +40,11 @@ no-inspect antigravity.googleapis.com:443
 no-inspect antigravity-pa.googleapis.com:443
 no-inspect antigravity-unleash.goog:443
 no-inspect cloudcode-pa.googleapis.com:443
+no-inspect daily-cloudcode-pa.googleapis.com:443
+no-inspect autopush-cloudcode-pa.sandbox.googleapis.com:443
+no-inspect preprod-daily-cloudcode-pa.sandbox.googleapis.com:443
+no-inspect aicode.googleapis.com:443
+no-inspect autopush-aicode.sandbox.googleapis.com:443
 no-inspect generativelanguage.googleapis.com:443
 no-inspect businessaicode.googleapis.com:443
 no-inspect aiplatform.googleapis.com:443
@@ -38,6 +53,9 @@ no-inspect aiplatform.googleapis.com:443
 func newAgy(opts Options) (Harness, error) {
 	if !opts.Sandbox {
 		return nil, fmt.Errorf("-harness agy requires -sandbox")
+	}
+	if err := checkExtraPolicy(opts.Policy, agyProfile()); err != nil {
+		return nil, err
 	}
 	return newSandboxWithProfile(opts, agyProfile()), nil
 }
@@ -50,7 +68,7 @@ func agyProfile() sandboxProfile {
 		extraPolicy:         agyExtraPolicy,
 		authVolume:          agyAuthVolume,
 		authLabel:           "rnes.auth=agy",
-		authMountTarget:     containerAgyAuthDir,
+		authMountTargets:    []string{containerAgyAuthDir, containerAgyCredentialDir},
 		skillsConfigHome:    containerAgyConfigHome,
 		skillsRelDir:        "skills",
 		containerArgs: func(modelID string, modelSet bool, extraArgs []string) []string {

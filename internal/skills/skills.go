@@ -40,6 +40,16 @@ var projectDirs = []string{".opencode/skills", ".opencode/skill", ".agent/skills
 // (used by DiscoverProject and DiscoverAll when generating opencode commands).
 var opencodeProjectDirs = []string{".opencode/skills", ".opencode/skill", ".claude/skills", ".agents/skills"}
 
+// projectDirsFor returns the project directories the named harness reads, so
+// the shadowing warning only ever names a directory the active harness
+// resolves; unknown harnesses default to opencode's.
+func projectDirsFor(harness string) []string {
+	if harness == "agy" {
+		return []string{".agent/skills"}
+	}
+	return opencodeProjectDirs
+}
+
 // Skill is one skill to attach.
 type Skill struct {
 	// Name is the skill's folder name, which is also where it is mounted.
@@ -160,7 +170,7 @@ func Resolve(req Request) ([]Skill, []string, error) {
 	}
 	warnings := r.warnings
 	for _, s := range out {
-		for _, d := range projectDirs {
+		for _, d := range projectDirsFor(agent) {
 			p := filepath.Join(req.Cwd, d, s.Name)
 			if _, err := os.Lstat(p); err == nil {
 				warnings = append(warnings, fmt.Sprintf("skill %q is attached from %s, but this project also has %s; which one %s uses is up to %s", s.Name, s.Path, filepath.Join(d, s.Name), agent, agent))

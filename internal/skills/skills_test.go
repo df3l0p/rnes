@@ -57,6 +57,10 @@ func (e env) resolve(values []string, dirs ...string) ([]Skill, []string, error)
 	return Resolve(Request{Values: values, Dirs: dirs, Home: e.home, Cwd: e.cwd})
 }
 
+func (e env) resolveFor(harness string, values []string, dirs ...string) ([]Skill, []string, error) {
+	return Resolve(Request{Values: values, Dirs: dirs, Home: e.home, Cwd: e.cwd, Harness: harness})
+}
+
 func names(skills []Skill) string {
 	var n []string
 	for _, s := range skills {
@@ -358,19 +362,42 @@ func TestAllSkipsInvalidEntriesWithAWarning(t *testing.T) {
 }
 
 func TestProjectCollisionWarns(t *testing.T) {
-	for _, d := range projectDirs {
-		t.Run(d, func(t *testing.T) {
+	for _, tc := range []struct{ harness, dir string }{
+		{"opencode", ".opencode/skills"},
+		{"opencode", ".opencode/skill"},
+		{"agy", ".agent/skills"},
+		{"opencode", ".claude/skills"},
+		{"opencode", ".agents/skills"},
+	} {
+		t.Run(tc.harness+"/"+tc.dir, func(t *testing.T) {
 			e := newEnv(t)
 			e.skill(e.opencode(), "foo")
-			e.skill(filepath.Join(e.cwd, d), "foo")
-			got, warns, err := e.resolve([]string{"foo"})
+			e.skill(filepath.Join(e.cwd, tc.dir), "foo")
+			got, warns, err := e.resolveFor(tc.harness, []string{"foo"})
 			if err != nil || len(got) != 1 {
 				t.Fatalf("got %v, %v", got, err)
 			}
-			if len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(d, "foo")) {
+			if len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(tc.dir, "foo")) {
 				t.Errorf("warnings = %q", warns)
 			}
 		})
+	}
+}
+
+// TestProjectCollisionWarningFollowsTheHarness keeps the warning to
+// directories the active harness reads: .agent/skills is agy's project
+// directory, so an opencode session must not be told opencode might use it.
+func TestProjectCollisionWarningFollowsTheHarness(t *testing.T) {
+	e := newEnv(t)
+	e.skill(e.opencode(), "foo")
+	e.skill(filepath.Join(e.cwd, ".agent", "skills"), "foo")
+
+	if _, warns, err := e.resolveFor("opencode", []string{"foo"}); err != nil || len(warns) != 0 {
+		t.Errorf("opencode: warnings = %q, err = %v, want none", warns, err)
+	}
+	_, warns, err := e.resolveFor("agy", []string{"foo"})
+	if err != nil || len(warns) != 1 || !strings.Contains(warns[0], filepath.Join(".agent", "skills", "foo")) {
+		t.Errorf("agy: warnings = %q, err = %v, want one naming .agent/skills/foo", warns, err)
 	}
 }
 

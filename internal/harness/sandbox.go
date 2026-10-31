@@ -81,9 +81,12 @@ type sandboxProfile struct {
 	authVolume func(dir string) string
 	// authLabel is the Docker volume label applied when creating authVolume.
 	authLabel string
-	// authMountTarget is the container path where authVolume is mounted
-	// read-write.
-	authMountTarget string
+	// authMountTargets are the container paths authVolume is mounted
+	// read-write at. One volume may back several credential locations (agy
+	// keeps OAuth state under both ~/.gemini/antigravity-cli and
+	// ~/.config/antigravity); the paths' file names must not collide, since
+	// they all land at the volume's root.
+	authMountTargets []string
 	// skillsConfigHome is the container parent directory staged from the host
 	// when skills (or skill commands) are mounted.
 	skillsConfigHome string
@@ -172,6 +175,45 @@ var isLocalIP = func(ip net.IP) bool {
 
 func newSandbox(opts Options, hostConfig string) *Sandbox {
 	return newSandboxWithProfile(opts, opencodeProfile(hostConfig))
+}
+
+// checkExtraPolicy rejects a session policy that lists one of the profile's
+// harness-required no-inspect endpoints for TLS inspection: the harness only
+// works with those endpoints tunnelled unread, so the two can't both apply,
+// and silently downgrading the user's entry would hide that from them. The
+// profile's own defaults (used when policy is nil) never conflict, but the
+// check covers them anyway so a future harness can't ship one that does.
+func checkExtraPolicy(policy []byte, profile sandboxProfile) error {
+	if profile.extraPolicy == "" {
+		return nil
+	}
+	user := policy
+	if user == nil {
+		user = defaultPolicy
+	}
+	if len(user) == 0 {
+		return nil
+	}
+	userPol, err := proxy.ParseUserPolicy(bytes.NewReader(user))
+	if err != nil {
+		return fmt.Errorf("checking the session policy: %w", err)
+	}
+	extraPol, err := proxy.ParsePolicy(strings.NewReader(profile.extraPolicy))
+	if err != nil {
+		return fmt.Errorf("checking the %s harness policy: %w", profile.harness, err)
+	}
+	var conflicts []string
+	for hp := range extraPol.NoInspect {
+		if userPol.Explicit(hp) && !userPol.SkipsInspect(hp) {
+			conflicts = append(conflicts, hp)
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	sort.Strings(conflicts)
+	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; mark it 'no-inspect' in %s or remove it there",
+		profile.harness, strings.Join(conflicts, ", "), ProjectPolicyRel, ProjectPolicyRel)
 }
 
 func newSandboxWithProfile(opts Options, profile sandboxProfile) *Sandbox {
@@ -607,8 +649,10 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 	if s.profile.usesGeneratedConfig {
 		args = append(args, "-v", s.generated+":"+containerConfigPath+":ro")
 	}
-	if vol := s.AuthVolume(dir); vol != "" && s.profile.authMountTarget != "" {
-		args = append(args, "-v", vol+":"+s.profile.authMountTarget)
+	if vol := s.AuthVolume(dir); vol != "" && len(s.profile.authMountTargets) > 0 {
+		for _, target := range s.profile.authMountTargets {
+			args = append(args, "-v", vol+":"+target)
+		}
 	}
 	// The proxy terminates TLS for some hosts with its own CA: trust it, via
 	// the volume it wrote its bundle to. Mounted at runtime, never baked into
