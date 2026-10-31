@@ -24,7 +24,8 @@ func gitRepo(t *testing.T) string {
 
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	all := append([]string{"-c", "commit.gpgsign=false", "-C", dir}, args...)
+	cmd := exec.Command("git", all...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
@@ -67,6 +68,24 @@ func TestCreateMakesAWorktreeAndReusesIt(t *testing.T) {
 	}
 }
 
+func TestGitDirsReadsARealWorktree(t *testing.T) {
+	repo := gitRepo(t)
+	path, err := Create(repo, "real")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, ok := GitDirs(path)
+	if !ok {
+		t.Fatal("GitDirs rejected a real linked worktree")
+	}
+	if !isWithin(got.CommonDir, got.Dir) {
+		t.Errorf("git dir %q is not below common dir %q", got.Dir, got.CommonDir)
+	}
+	if got.CommonDir == string(filepath.Separator) {
+		t.Errorf("common dir is the filesystem root")
+	}
+}
+
 func TestCreateChecksOutAnExistingBranch(t *testing.T) {
 	repo := gitRepo(t)
 	runGit(t, repo, "branch", "already-there")
@@ -91,47 +110,115 @@ func TestCreateRejectsBadNames(t *testing.T) {
 	}
 }
 
-func TestCreateRejectsANonRepositoryAndAForeignDirectory(t *testing.T) {
+func TestCreateRejectsANonRepository(t *testing.T) {
 	if _, err := Create(t.TempDir(), "x"); err == nil || !strings.Contains(err.Error(), "git repository") {
 		t.Errorf("Create(outside a repository) = %v, want a git repository error", err)
 	}
+}
 
+func TestCreateRejectsAnOrdinaryDirectoryInTheWorktreeSlot(t *testing.T) {
+	repo := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, Dir, "plain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(repo, "plain"); err == nil {
+		t.Error("Create reused an ordinary directory")
+	}
+}
+
+func TestCreateRejectsAForeignWorktree(t *testing.T) {
 	repo := gitRepo(t)
 	other := gitRepo(t)
 	foreign, err := Create(other, "foreign")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A directory already at <repo>/.worktree/x that belongs to another
-	// repository must not be mistaken for this repo's worktree.
-	base := filepath.Join(repo, Dir)
-	if err := os.MkdirAll(base, 0o755); err != nil {
+
+	// Put a real directory with a foreign worktree's .git file in this
+	// repository's .worktree slot. It must not be mistaken for a worktree of
+	// repo.
+	target := filepath.Join(repo, Dir, "foreign")
+	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(foreign, filepath.Join(base, "foreign")); err != nil {
+	raw, err := os.ReadFile(filepath.Join(foreign, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".git"), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Create(repo, "foreign"); err == nil {
-		t.Error("Create reused a symlink or another repository's worktree")
+		t.Error("Create reused another repository's worktree")
 	}
 }
 
-func TestGitDirsReadsALinkedWorktree(t *testing.T) {
-	repo := t.TempDir()
-	common := filepath.Join(repo, ".git")
-	gitDir := filepath.Join(common, "worktrees", "wt")
-	for _, d := range []string{gitDir, filepath.Join(repo, Dir, "wt")} {
+func TestCreateForcesAbsoluteWorktreePaths(t *testing.T) {
+	repo := gitRepo(t)
+	runGit(t, repo, "config", "worktree.useRelativePaths", "true")
+	path, err := Create(repo, "feature-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(raw)), "gitdir:"))
+	if !filepath.IsAbs(value) {
+		t.Errorf("worktree .git uses a non-absolute gitdir %q", value)
+	}
+}
+
+// fakeLinkedWorktree lays out the directories and files GitDirs needs for a
+// linked worktree. rel controls whether the .git and gitdir files use relative
+// paths.
+func fakeLinkedWorktree(t *testing.T, repo, name string, rel bool) (wt, gitDir, common string) {
+	t.Helper()
+	common = filepath.Join(repo, ".git")
+	gitDir = filepath.Join(common, "worktrees", name)
+	wt = filepath.Join(repo, Dir, name)
+	for _, d := range []string{gitDir, wt, common, filepath.Join(common, "objects")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	wt := filepath.Join(repo, Dir, "wt")
-	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+	for _, d := range []string{gitDir, common} {
+		for _, sub := range []string{"HEAD", "refs"} {
+			if sub == "HEAD" {
+				if err := os.WriteFile(filepath.Join(d, sub), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Join(d, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	commondir := "../.."
+	gitdir := filepath.Join(wt, ".git")
+	gitfile := "gitdir: " + gitDir + "\n"
+	if rel {
+		commondir = "../.."
+		gitdir = "../../../.worktree/" + name + "/.git"
+		gitfile = "gitdir: ../../.git/worktrees/" + name + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(commondir+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(gitDir, "gitdir"), []byte(gitdir+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte(gitfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return wt, gitDir, common
+}
+
+func TestGitDirsReadsALinkedWorktree(t *testing.T) {
+	repo := t.TempDir()
+	wt, gitDir, common := fakeLinkedWorktree(t, repo, "wt", false)
 
 	got, ok := GitDirs(wt)
 	if !ok {
@@ -151,21 +238,69 @@ func TestGitDirsReadsALinkedWorktree(t *testing.T) {
 	}
 }
 
-func TestGitDirsKeepsRelativePathsRelative(t *testing.T) {
-	repo := t.TempDir()
-	gitDir := filepath.Join(repo, ".git", "worktrees", "wt")
-	wt := filepath.Join(repo, Dir, "wt")
-	for _, d := range []string{gitDir, wt} {
+func TestGitDirsReadsASubmodule(t *testing.T) {
+	super := t.TempDir()
+	superGit := filepath.Join(super, ".git")
+	sub := filepath.Join(super, "sub")
+	subGit := filepath.Join(superGit, "modules", "sub")
+	for _, d := range []string{
+		superGit, filepath.Join(superGit, "objects"), filepath.Join(superGit, "refs"),
+		subGit, filepath.Join(subGit, "objects"), filepath.Join(subGit, "refs"),
+		sub,
+	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+	for _, d := range []string{superGit, subGit} {
+		if err := os.WriteFile(filepath.Join(d, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../.git/modules/sub\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: ../../.git/worktrees/wt\n"), 0o644); err != nil {
+
+	got, ok := GitDirs(sub)
+	if !ok {
+		t.Fatal("GitDirs rejected a submodule")
+	}
+	if got.Dir != subGit || got.CommonDir != subGit {
+		t.Errorf("GitDirs = %+v, want git/common dir %s", got, subGit)
+	}
+}
+
+func TestGitDirsRejectsAForeignSubmodule(t *testing.T) {
+	other := t.TempDir()
+	otherGit := filepath.Join(other, ".git")
+	subGit := filepath.Join(otherGit, "modules", "sub")
+	for _, d := range []string{otherGit, filepath.Join(otherGit, "objects"), filepath.Join(otherGit, "refs"), subGit, filepath.Join(subGit, "objects"), filepath.Join(subGit, "refs")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{otherGit, subGit} {
+		if err := os.WriteFile(filepath.Join(d, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repo := t.TempDir()
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: "+subGit+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := GitDirs(sub); ok {
+		t.Error("GitDirs accepted another repository's submodule")
+	}
+}
+
+func TestGitDirsKeepsRelativePathsRelative(t *testing.T) {
+	repo := t.TempDir()
+	wt, gitDir, common := fakeLinkedWorktree(t, repo, "wt", true)
 
 	got, ok := GitDirs(wt)
 	if !ok {
@@ -177,7 +312,47 @@ func TestGitDirsKeepsRelativePathsRelative(t *testing.T) {
 	if got.Dir != gitDir {
 		t.Errorf("Dir = %q, want %q", got.Dir, gitDir)
 	}
-	if got.CommonDir != filepath.Join(repo, ".git") {
+	if got.CommonDir != common {
 		t.Errorf("CommonDir = %q", got.CommonDir)
+	}
+}
+
+func TestGitDirsRejectsUnsafeOrUnrelatedDirectories(t *testing.T) {
+	// A .git file pointing at an ordinary directory must not be accepted.
+	plain := t.TempDir()
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+plain+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := GitDirs(wt); ok {
+		t.Error("GitDirs accepted a plain directory")
+	}
+
+	// A valid-looking git directory that isn't this worktree's layout is
+	// refused too.
+	other := t.TempDir()
+	for _, d := range []string{other, filepath.Join(other, "objects"), filepath.Join(other, "refs")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(other, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+other+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := GitDirs(wt); ok {
+		t.Error("GitDirs accepted an unrelated git directory")
+	}
+
+	// A commondir that resolves to / must be rejected rather than mounted.
+	repo := t.TempDir()
+	linked, gitDir, _ := fakeLinkedWorktree(t, repo, "wt", false)
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := GitDirs(linked); ok {
+		t.Error("GitDirs accepted a common dir of /")
 	}
 }

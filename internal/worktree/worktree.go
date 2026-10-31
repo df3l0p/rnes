@@ -86,7 +86,11 @@ func Create(dir, name string) (string, error) {
 		return "", fmt.Errorf("checking %s: %w", path, err)
 	}
 
-	args := []string{"worktree", "add", "--quiet"}
+	// Always make rnes-created worktrees use absolute paths. If the user's
+	// git config sets worktree.useRelativePaths, git would also record the
+	// relativeworktrees repository extension, which the bundled sandbox git
+	// (2.39) doesn't understand.
+	args := []string{"-c", "worktree.useRelativePaths=false", "worktree", "add", "--quiet"}
 	if branchExists(root, name) {
 		args = append(args, path, name)
 	} else {
@@ -102,7 +106,11 @@ func Create(dir, name string) (string, error) {
 // it points at. ok is false when dir has no .git file (a normal checkout or no
 // checkout at all), or when the file doesn't point at a usable git directory.
 func GitDirs(dir string) (dirs Dirs, ok bool) {
-	raw, err := os.ReadFile(filepath.Join(dir, ".git"))
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return Dirs{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(absDir, ".git"))
 	if err != nil {
 		return Dirs{}, false
 	}
@@ -117,10 +125,10 @@ func GitDirs(dir string) (dirs Dirs, ok bool) {
 	}
 	gitDir := relDir
 	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
+		gitDir = filepath.Join(absDir, gitDir)
 	}
 	gitDir = filepath.Clean(gitDir)
-	if fi, err := os.Stat(gitDir); err != nil || !fi.IsDir() {
+	if !validGitDir(gitDir) {
 		return Dirs{}, false
 	}
 
@@ -135,7 +143,134 @@ func GitDirs(dir string) (dirs Dirs, ok bool) {
 			commonDir = filepath.Clean(commonDir)
 		}
 	}
+	if !validCommonDir(commonDir) {
+		return Dirs{}, false
+	}
+
+	switch {
+	case gitDir == commonDir:
+		// A submodule's .git file points at <super>/.git/modules/<name>,
+		// under the superproject that contains dir.
+		if filepath.Base(filepath.Dir(gitDir)) != "modules" {
+			return Dirs{}, false
+		}
+		superDir, ok := superprojectGitDir(absDir)
+		if !ok || !isWithin(superDir, gitDir) {
+			return Dirs{}, false
+		}
+	default:
+		// A linked worktree's .git file points at
+		// <common>/worktrees/<name>/.git. Refuse anything that isn't laid
+		// out that way, and verify the reverse link as well.
+		if !isWithin(commonDir, gitDir) || filepath.Base(filepath.Dir(gitDir)) != "worktrees" {
+			return Dirs{}, false
+		}
+		if !gitdirPointsTo(gitDir, filepath.Join(absDir, ".git")) {
+			return Dirs{}, false
+		}
+	}
+
+	// Never let a .git file redirect the sandbox mount at the project's own
+	// parent, at /, or at any other ancestor of the project.
+	for _, p := range []string{gitDir, commonDir} {
+		if isWithin(p, absDir) {
+			return Dirs{}, false
+		}
+	}
 	return Dirs{Dir: gitDir, CommonDir: commonDir, RelDir: relDir, RelCommon: relCommon}, true
+}
+
+// superprojectGitDir returns the git directory of the superproject containing
+// dir as a submodule.
+func superprojectGitDir(dir string) (string, bool) {
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		dotGit := filepath.Join(parent, ".git")
+		fi, err := os.Lstat(dotGit)
+		if err == nil {
+			if fi.IsDir() {
+				return dotGit, true
+			}
+			if fi.Mode().IsRegular() {
+				dirs, ok := GitDirs(parent)
+				if !ok {
+					return "", false
+				}
+				return dirs.Dir, true
+			}
+		}
+		if parent == filepath.Dir(parent) {
+			return "", false
+		}
+	}
+}
+
+// validGitDir reports whether dir has the shape of a git directory. It
+// deliberately does not need git to be installed.
+func validGitDir(dir string) bool {
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	head, err := os.Stat(filepath.Join(dir, "HEAD"))
+	if err != nil || !head.Mode().IsRegular() {
+		return false
+	}
+	refs, err := os.Stat(filepath.Join(dir, "refs"))
+	return err == nil && refs.IsDir()
+}
+
+// validCommonDir is validGitDir plus the objects directory the common git
+// directory owns.
+func validCommonDir(dir string) bool {
+	if !validGitDir(dir) {
+		return false
+	}
+	objects, err := os.Stat(filepath.Join(dir, "objects"))
+	return err == nil && objects.IsDir()
+}
+
+// gitdirPointsTo reports whether gitDir's gitdir file names dotGit.
+func gitdirPointsTo(gitDir, dotGit string) bool {
+	raw, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+	if err != nil {
+		return false
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return false
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(gitDir, value)
+	}
+	return samePath(value, dotGit)
+}
+
+// samePath compares two paths, preferring a filesystem identity check so
+// case-insensitive and symlinked paths compare correctly.
+func samePath(a, b string) bool {
+	if ai, err := os.Stat(a); err == nil {
+		if bi, err := os.Stat(b); err == nil {
+			return os.SameFile(ai, bi)
+		}
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(absA); err == nil {
+		absA = real
+	}
+	if real, err := filepath.EvalSymlinks(absB); err == nil {
+		absB = real
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB)
+}
+
+// isWithin reports whether path is dir itself or below it.
+func isWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // ensureBase ensures <root>/.worktree is a real directory owned by the user,
@@ -165,15 +300,15 @@ func ensureBase(root string) (string, error) {
 // isWorktreeOf reports whether path is a linked worktree of the repository at
 // root (not merely a checkout of some other repository).
 func isWorktreeOf(path, root string) bool {
-	pathCommon, err := commonDir(path)
-	if err != nil {
+	dirs, ok := GitDirs(path)
+	if !ok {
 		return false
 	}
 	rootCommon, err := commonDir(root)
 	if err != nil {
 		return false
 	}
-	return pathCommon == rootCommon
+	return dirs.CommonDir == rootCommon
 }
 
 // commonDir resolves dir's common git directory to an absolute path, whether

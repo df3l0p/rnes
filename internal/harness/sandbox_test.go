@@ -236,12 +236,23 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	common := filepath.Join(repo, ".git")
 	gitDir := filepath.Join(common, "worktrees", "wt")
 	wt := filepath.Join(repo, ".worktree", "wt")
-	for _, d := range []string{gitDir, wt} {
+	for _, d := range []string{gitDir, wt, common, filepath.Join(common, "objects")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	for _, d := range []string{gitDir, common} {
+		if err := os.WriteFile(filepath.Join(d, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(d, "refs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "gitdir"), []byte(filepath.Join(wt, ".git")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
@@ -256,6 +267,9 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 
 	// A relative .git file is resolved from the container's workdir, not the
 	// host path of the worktree.
+	if err := os.WriteFile(filepath.Join(gitDir, "gitdir"), []byte("../../../.worktree/wt/.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: ../../.git/worktrees/wt\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -272,6 +286,16 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	}
 	if got := gitMounts(plain); len(got) != 0 {
 		t.Errorf("gitMounts(normal checkout) = %v, want none", got)
+	}
+
+	// A .git file must not be able to point the sandbox at an arbitrary
+	// host directory.
+	unsafe := t.TempDir()
+	if err := os.WriteFile(filepath.Join(unsafe, ".git"), []byte("gitdir: /\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitMounts(unsafe); len(got) != 0 {
+		t.Errorf("gitMounts(unsafe .git) = %v, want none", got)
 	}
 }
 

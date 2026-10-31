@@ -786,11 +786,11 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 // Its .git is a file pointing at <repo>/.git/worktrees/<name> (outside the
 // mounted worktree), so mounting only dir at /workspace would leave git unable
 // to find the repository. The common git directory is mounted at the path the
-// .git file names, or — for a worktree made with --relative-paths — at the path
-// that relative name resolves to from /workspace. That also keeps git's objects,
-// refs, config and the worktree's own index and HEAD writable for the session.
-// A normal checkout's .git is a directory already inside dir, so it needs no
-// extra mount.
+// .git file names; a relative .git file (from --relative-paths) is resolved
+// from /workspace, though the bundled image's git 2.39 rejects that extension.
+// That also keeps git's objects, refs, config and the worktree's own index and
+// HEAD writable for the session. A normal checkout's .git is a directory
+// already inside dir, so it needs no extra mount.
 func gitMounts(dir string) []string {
 	dirs, ok := worktree.GitDirs(dir)
 	if !ok {
