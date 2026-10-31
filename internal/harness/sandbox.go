@@ -163,6 +163,9 @@ type Sandbox struct {
 	// configHome is the host staging directory mounted at
 	// profile.skillsConfigHome when skills are attached, set by Run.
 	configHome string
+	// gitMaskDir stages empty files/directories mounted read-only over a
+	// worktree's git hooks and config, set by Run.
+	gitMaskDir string
 	// modelSet and extraArgs come from Options.ModelSet and Options.Args.
 	modelSet  bool
 	extraArgs []string
@@ -487,6 +490,15 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		return err
 	}
 
+	// Hooks and config in the shared git directory are mounted read-only
+	// below; stage the placeholders used when the host has neither.
+	maskDir, err := os.MkdirTemp("", "rnes-git-mask-*")
+	if err != nil {
+		return fmt.Errorf("creating git masks: %w", err)
+	}
+	s.gitMaskDir = maskDir
+	defer os.RemoveAll(maskDir)
+
 	if vol := s.AuthVolume(dir); vol != "" {
 		volArgs := []string{"volume", "create"}
 		if s.profile.authLabel != "" {
@@ -735,7 +747,7 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 	// A linked worktree's .git is a file pointing outside dir, so the git
 	// directory it names has to be in the container too. A normal checkout's
 	// .git is already under dir and needs nothing.
-	args = append(args, gitMounts(dir)...)
+	args = append(args, s.gitMounts(dir)...)
 	if s.profile.usesGeneratedConfig {
 		args = append(args, "-v", s.generated+":"+containerConfigPath+":ro")
 	}
@@ -788,10 +800,11 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 // to find the repository. The common git directory is mounted at the path the
 // .git file names; a relative .git file (from --relative-paths) is resolved
 // from /workspace, though the bundled image's git 2.39 rejects that extension.
-// That also keeps git's objects, refs, config and the worktree's own index and
-// HEAD writable for the session. A normal checkout's .git is a directory
-// already inside dir, so it needs no extra mount.
-func gitMounts(dir string) []string {
+// That keeps git's objects, refs and the worktree's own index and HEAD writable
+// for the session; hooks and config are masked read-only below. A normal
+// checkout's .git is a directory already inside dir, so it needs no extra
+// mount.
+func (s *Sandbox) gitMounts(dir string) []string {
 	dirs, ok := worktree.GitDirs(dir)
 	if !ok {
 		return nil
@@ -809,6 +822,38 @@ func gitMounts(dir string) []string {
 		// The worktree's git directory isn't below the common one (an
 		// unusual separate-git-dir layout): mount it as well.
 		args = append(args, "--mount", bindMount(dirs.Dir, targetDir, false))
+	}
+	args = append(args, s.gitMaskMounts(dirs, targetCommon, targetDir)...)
+	return args
+}
+
+// gitMaskMounts keeps the agent from planting hooks or changing git config in
+// the host repository. The rest of the shared git directory stays writable so
+// git add/commit can update the worktree's index, HEAD, refs and objects.
+func (s *Sandbox) gitMaskMounts(dirs worktree.Dirs, targetCommon, targetDir string) []string {
+	if s.gitMaskDir == "" {
+		return nil
+	}
+	var args []string
+	add := func(source, target string, wantDir bool) {
+		if fi, err := os.Stat(source); err == nil && fi.IsDir() == wantDir {
+			args = append(args, "--mount", bindMount(source, target, true))
+			return
+		}
+		placeholder := filepath.Join(s.gitMaskDir, "empty-file")
+		if wantDir {
+			placeholder = filepath.Join(s.gitMaskDir, "empty-dir")
+			_ = os.MkdirAll(placeholder, 0o755)
+		} else {
+			_ = os.WriteFile(placeholder, nil, 0o600)
+		}
+		args = append(args, "--mount", bindMount(placeholder, target, true))
+	}
+	add(filepath.Join(dirs.CommonDir, "hooks"), filepath.Join(targetCommon, "hooks"), true)
+	add(filepath.Join(dirs.CommonDir, "config"), filepath.Join(targetCommon, "config"), false)
+	add(filepath.Join(dirs.CommonDir, "config.worktree"), filepath.Join(targetCommon, "config.worktree"), false)
+	if targetDir != targetCommon {
+		add(filepath.Join(dirs.Dir, "config.worktree"), filepath.Join(targetDir, "config.worktree"), false)
 	}
 	return args
 }

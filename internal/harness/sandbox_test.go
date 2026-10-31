@@ -236,7 +236,7 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	common := filepath.Join(repo, ".git")
 	gitDir := filepath.Join(common, "worktrees", "wt")
 	wt := filepath.Join(repo, ".worktree", "wt")
-	for _, d := range []string{gitDir, wt, common, filepath.Join(common, "objects")} {
+	for _, d := range []string{gitDir, wt, common, filepath.Join(common, "objects"), filepath.Join(common, "hooks")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -249,6 +249,9 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(common, "config"), []byte("[core]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -259,10 +262,19 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := strings.Join(gitMounts(wt), " ")
-	want := "--mount " + bindMount(common, common, false)
-	if got != want {
-		t.Errorf("gitMounts = %q, want %q", got, want)
+	s := newSandbox(Options{Sandbox: true}, "")
+	s.gitMaskDir = t.TempDir()
+	got := strings.Join(s.gitMounts(wt), " ")
+	for _, want := range []string{
+		"--mount " + bindMount(common, common, false),
+		"--mount " + bindMount(filepath.Join(common, "hooks"), filepath.Join(common, "hooks"), true),
+		"--mount " + bindMount(filepath.Join(common, "config"), filepath.Join(common, "config"), true),
+		"target=" + filepath.Join(common, "config.worktree") + ",readonly",
+		"target=" + filepath.Join(gitDir, "config.worktree") + ",readonly",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("gitMounts missing %q:\n%s", want, got)
+		}
 	}
 
 	// A relative .git file is resolved from the container's workdir, not the
@@ -273,10 +285,17 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: ../../.git/worktrees/wt\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got = strings.Join(gitMounts(wt), " ")
-	want = "--mount " + bindMount(common, "/.git", false)
-	if got != want {
-		t.Errorf("gitMounts(relative) = %q, want %q", got, want)
+	got = strings.Join(s.gitMounts(wt), " ")
+	for _, want := range []string{
+		"--mount " + bindMount(common, "/.git", false),
+		"target=/.git/hooks,readonly",
+		"target=/.git/config,readonly",
+		"target=/.git/config.worktree,readonly",
+		"target=/.git/worktrees/wt/config.worktree,readonly",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("gitMounts(relative) missing %q:\n%s", want, got)
+		}
 	}
 
 	// A normal checkout's .git is inside the mounted workdir already.
@@ -284,7 +303,7 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(plain, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitMounts(plain); len(got) != 0 {
+	if got := s.gitMounts(plain); len(got) != 0 {
 		t.Errorf("gitMounts(normal checkout) = %v, want none", got)
 	}
 
@@ -294,7 +313,7 @@ func TestGitMountsMakeALinkedWorktreeUsableInTheSandbox(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(unsafe, ".git"), []byte("gitdir: /\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitMounts(unsafe); len(got) != 0 {
+	if got := s.gitMounts(unsafe); len(got) != 0 {
 		t.Errorf("gitMounts(unsafe .git) = %v, want none", got)
 	}
 }

@@ -114,11 +114,14 @@ A linked worktree's `.git` is a *file* pointing outside the worktree (at the
 repository's shared `.git/worktrees/<name>`), so mounting only the worktree
 would leave `git` unable to find the repository. To keep git working in the
 sandbox, rnes also mounts that shared git directory read-write at the path the
-`.git` file names, so git can update the worktree's index, HEAD and refs. The
-rest of the repository is not mounted. rnes-created worktrees use absolute
-paths; the bundled sandbox git (2.39) rejects the `relativeworktrees` extension
-used by `git worktree add --relative-paths`, so recreate a manual relative
-worktree without that option (or use a newer git in the sandbox).
+`.git` file names, so git can update the worktree's index, HEAD and refs. Its
+`hooks/` and `config` (including `config.worktree`) are mounted read-only, so
+the agent can run git commands but cannot plant host hooks or change the
+repository's git configuration. The rest of the repository is not mounted.
+rnes-created worktrees use absolute paths; the bundled sandbox git (2.39)
+rejects the `relativeworktrees` extension used by
+`git worktree add --relative-paths`, so recreate a manual relative worktree
+without that option (or use a newer git in the sandbox).
 
 The worktree and its branch are left in place when the session ends, so the
 next `-worktree <name>` continues where it stopped. Remove one with
