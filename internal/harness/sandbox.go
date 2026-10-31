@@ -573,21 +573,36 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Everything rnes prints about the web UI happens here, before the TUI
+	// takes the terminal: a write from the pairing goroutine below would land
+	// in the middle of the alternate screen. The address and password are
+	// durable for the session, whereas a pairing link expires in five minutes.
+	linkPath := ""
+	if s.webExpose {
+		fmt.Fprintf(os.Stderr, "rnes: web UI: %s (password: %s)\n", webBaseURL(pn.forwardHostPort), s.webPassword)
+		if s.openWeb {
+			linkPath = filepath.Join(os.TempDir(), fmt.Sprintf("rnes-web-%d.link", os.Getpid()))
+			os.Remove(linkPath) // stale files from a recycled pid
+			os.Remove(linkPath + ".log")
+			fmt.Fprintf(os.Stderr, "rnes: opening it in your browser; the one-time link is also written to %s\n", linkPath)
+		} else {
+			fmt.Fprintln(os.Stderr, "rnes: note: open that address in a browser and choose \"Use password\"")
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if s.webExpose && !s.openWeb {
-		// Printed before the TUI starts (the TUI owns the terminal after
-		// that). The pairing link would expire before the user needs it, so
-		// give them the address and the password instead; the server's
-		// connect screen accepts either.
-		fmt.Fprintf(os.Stderr, "rnes: web UI: %s (password: %s)\n", webBaseURL(pn.forwardHostPort), s.webPassword)
-		fmt.Fprintln(os.Stderr, "rnes: note: open that address in a browser and choose \"Use password\"")
-	}
 	if s.webExpose && s.openWeb {
-		go s.exposeWeb(pn.forwardHostPort)
+		go s.exposeWeb(pn.forwardHostPort, linkPath)
 	}
 	runErr := cmd.Wait()
+	if linkPath != "" {
+		// Safe now: the TUI has exited. Report a failed pairing, which the
+		// goroutine wrote here instead of into the live screen.
+		if data, err := os.ReadFile(linkPath + ".log"); err == nil && len(data) > 0 {
+			fmt.Fprintf(os.Stderr, "rnes: web UI: %s\n", strings.TrimSpace(string(data)))
+		}
+	}
 
 	// Stop the proxy before reading its log so the follower has flushed any
 	// final lines; defer pn.stop() above remains a no-op backstop.
@@ -600,23 +615,33 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 
 // exposeWeb waits for the container's opencode server (through the proxy's
 // published forward), pairs, and opens the web UI. It runs beside the
-// container; failure only means no browser, never a failed session.
-func (s *Sandbox) exposeWeb(hostPort int) {
+// container and never writes to the terminal: the TUI owns it by now. The
+// link goes to linkPath for a confirmation, and failures to linkPath+".log",
+// which Run prints after the TUI exits.
+func (s *Sandbox) exposeWeb(hostPort int, linkPath string) {
+	fail := func(msg string) {
+		_ = os.WriteFile(linkPath+".log", []byte(msg+"\n"), 0o600)
+	}
 	if hostPort == 0 {
-		fmt.Fprintln(os.Stderr, "rnes: warning: the web UI forward has no host port; skipping the web UI")
+		fail("couldn't open it: the web forward has no host port")
 		return
 	}
 	base := webBaseURL(hostPort)
 	if err := waitWebReady(base, s.webPassword, webReadyTimeout, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "rnes: warning: the sandbox's web server didn't answer: %v (see `docker logs`)\n", err)
+		fail(fmt.Sprintf("couldn't open it: the sandbox's web server didn't answer: %v (its log is /tmp/rnes-opencode-serve.log in the container)", err))
 		return
 	}
 	link, err := pairLink(base, s.webPassword)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "rnes: warning: couldn't pair the web UI: %v\n", err)
+		fail(fmt.Sprintf("couldn't pair it: %v", err))
 		return
 	}
-	printWebLink(link)
+	if err := os.WriteFile(linkPath, []byte(link+"\n"), 0o600); err != nil {
+		fail(fmt.Sprintf("couldn't record the link: %v", err))
+		return
+	}
+	// Best effort: the address and password printed above work either way.
+	_ = openBrowser(link)
 }
 
 // applyModel makes the session start on providerKey/modelID. The harness's
@@ -766,8 +791,25 @@ func (s *Sandbox) webScript() string {
 		"i=$((i+1)); sleep 0.2;",
 		"done;",
 		"if [ $i -ge 300 ]; then echo 'rnes: the sandbox web server did not start:' >&2; cat /tmp/rnes-opencode-serve.log >&2; exit 1; fi;",
-		"exec opencode --server http://127.0.0.1:" + strconv.Itoa(webSandboxPort) + " .",
+		"exec opencode --server http://127.0.0.1:" + strconv.Itoa(webSandboxPort) + " ." + s.quotedExtraArgs(),
 	}, " ")
+}
+
+// quotedExtraArgs is the argv passthrough (rnes -- ...), shell-quoted for the
+// sh -c command line the web script runs. Without this, -web would silently
+// drop arguments that a plain sandbox session passes to the agent.
+func (s *Sandbox) quotedExtraArgs() string {
+	var b strings.Builder
+	for _, a := range s.extraArgs {
+		b.WriteString(" ")
+		b.WriteString(shellQuote(a))
+	}
+	return b.String()
+}
+
+// shellQuote quotes one argument for a POSIX shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // newPlaceholder returns an opaque stand-in for a credential.

@@ -843,7 +843,7 @@ func TestSandboxRunStagesNothingWithoutSkillsOrSkillCommands(t *testing.T) {
 }
 
 func TestSandboxWebRunStartsServerAndTUISharingIt(t *testing.T) {
-	s := &Sandbox{webExpose: true, webPassword: "secret", generated: "/tmp/config.jsonc"}
+	s := &Sandbox{webExpose: true, webPassword: "secret", generated: "/tmp/config.jsonc", extraArgs: []string{"--foo", "a b", "it's"}}
 	args := s.runArgs("rnes-1", t.TempDir(), &proxyNet{network: "rnes-net-1"}, false)
 
 	run := strings.Join(args, " ")
@@ -853,7 +853,7 @@ func TestSandboxWebRunStartsServerAndTUISharingIt(t *testing.T) {
 		"opencode serve --hostname 0.0.0.0 --port 4096",
 		"node -e",
 		"while [ $i -lt 300 ]",
-		"exec opencode --server http://127.0.0.1:4096 .",
+		"exec opencode --server http://127.0.0.1:4096 . '--foo' 'a b' 'it'\\''s'",
 	} {
 		if !strings.Contains(run, want) {
 			t.Errorf("web run args missing %q:\n%s", want, run)

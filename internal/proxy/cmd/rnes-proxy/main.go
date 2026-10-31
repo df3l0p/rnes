@@ -102,6 +102,18 @@ func startForward(spec string) error {
 	if !ok || listen == "" || target == "" {
 		return fmt.Errorf("-forward wants listen=target, got %q", spec)
 	}
+	// Bind to this container's own bridge address rather than every
+	// interface. rnes publishes the port on host loopback, and Docker's
+	// forwarding targets the bridge address, so the host still reaches it.
+	// The session's internal-network interface is attached after this
+	// process starts, so the sandbox can't reach the listener through it.
+	if host, port, err := net.SplitHostPort(listen); err == nil && host == "" {
+		ip, err := bridgeIPv4()
+		if err != nil {
+			return fmt.Errorf("forward listener: %w", err)
+		}
+		listen = net.JoinHostPort(ip, port)
+	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return fmt.Errorf("forward listener: %w", err)
@@ -126,4 +138,24 @@ func startForward(spec string) error {
 		}
 	}()
 	return nil
+}
+
+// bridgeIPv4 returns this container's first non-loopback IPv4 address: the
+// default bridge interface rnes starts the proxy on, and the address Docker
+// publishes ports to.
+func bridgeIPv4() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipnet.IP.To4(); ip4 != nil {
+			return ip4.String(), nil
+		}
+	}
+	return "", fmt.Errorf("no non-loopback IPv4 address to bind to")
 }

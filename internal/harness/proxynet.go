@@ -137,9 +137,10 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect bool, provide
 	if webTarget != "" {
 		// The proxy is on the default bridge (it joins the internal network
 		// below), so a published port works here, where it wouldn't on an
-		// --internal container. Loopback only: the web server is
-		// password-protected, but it still shouldn't be reachable from the
-		// network.
+		// --internal container. The forwarder binds to the bridge address
+		// (see rnes-proxy -forward), so the published port reaches it while
+		// the session's internal network cannot; the host side is loopback
+		// only.
 		runArgs = append(runArgs, "-p", "127.0.0.1::"+strconv.Itoa(proxyForwardPort))
 	}
 	if inspect {
