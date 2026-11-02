@@ -92,8 +92,8 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(starCwd, ".rnes", "policy.txt"), []byte("*\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := LoadProjectPolicy(starCwd); err == nil || !strings.Contains(err.Error(), "-all-net") {
-		t.Errorf("star policy err = %v, want error naming -all-net", err)
+	if _, _, _, err := LoadProjectPolicy(starCwd); err == nil || !strings.Contains(err.Error(), "-allow-public") {
+		t.Errorf("star policy err = %v, want error naming -allow-public", err)
 	}
 
 	// Rejects symlinked policy.txt.

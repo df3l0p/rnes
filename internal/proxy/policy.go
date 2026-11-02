@@ -25,8 +25,9 @@ func ParsePolicy(r io.Reader) (Policy, error) {
 // ParseUserPolicy reads a user-managed policy file (.rnes/policy.txt): one
 // explicit "host:port" or "no-inspect host:port" per line, with '#' comments
 // and blank lines ignored. Unlike ParsePolicy, it rejects "*" (wildcard public
-// egress is gated by the -all-net CLI flag) and "private" entries (every user
-// policy host must resolve to a public address).
+// egress is gated by the -allow-public CLI flag) and "private" entries (every
+// user policy host must resolve to a public address unless -allow-private is
+// passed on the command line).
 func ParseUserPolicy(r io.Reader) (Policy, error) {
 	return parsePolicy(r, false)
 }
@@ -43,7 +44,7 @@ func parsePolicy(r io.Reader, internal bool) (Policy, error) {
 		}
 		if line == "*" {
 			if !internal {
-				return Policy{}, fmt.Errorf("line %d: \"*\" is not allowed in policy.txt; pass -all-net on the command line instead", n)
+				return Policy{}, fmt.Errorf("line %d: \"*\" is not allowed in policy.txt; pass -allow-public on the command line instead", n)
 			}
 			anyPublic = true
 			continue

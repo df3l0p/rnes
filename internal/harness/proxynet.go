@@ -71,12 +71,13 @@ const logFollowGrace = 2 * time.Second
 // Sandbox.hostIP already computes for host.docker.internal). policy is the
 // proxy's allow-list, in the proxy's policy format. With inspect the proxy
 // also terminates TLS for the policy's explicit hosts: it gets a CA volume to
-// write its trust bundle to, and its log is followed into a file. providers,
-// when non-empty, is the line of provider config rnes-proxy reads from its stdin
-// (see proxy.EncodeProviders); it requires inspect, since credentials can only
-// be injected into decrypted requests.
+// write its trust bundle to, and its log is followed into a file. With
+// allowPrivate the proxy also dials private addresses (RFC 1918 / IPv6 ULA).
+// providers, when non-empty, is the line of provider config rnes-proxy reads
+// from its stdin (see proxy.EncodeProviders); it requires inspect, since
+// credentials can only be injected into decrypted requests.
 func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers []byte) (*proxyNet, error) {
-	return startProxyNetWeb(image, hostIP, policy, inspect, providers, "")
+	return startProxyNetWeb(image, hostIP, policy, inspect, false, providers, "")
 }
 
 // startProxyNetWeb is startProxyNet plus an optional TCP forward for the web
@@ -84,7 +85,7 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 // name:4096) is set, the proxy listens inside its container and rnes publishes
 // that port on host loopback. The sandbox itself stays on the internal
 // network; the forwarder only dials it.
-func startProxyNetWeb(image, hostIP string, policy []byte, inspect bool, providers []byte, webTarget string) (*proxyNet, error) {
+func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate bool, providers []byte, webTarget string) (*proxyNet, error) {
 	if len(providers) > 0 && !inspect {
 		return nil, fmt.Errorf("credential providers need TLS interception")
 	}
@@ -153,6 +154,9 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect bool, provide
 	runArgs = append(runArgs, image)
 	if inspect {
 		runArgs = append(runArgs, "-intercept")
+	}
+	if allowPrivate {
+		runArgs = append(runArgs, "-allow-private")
 	}
 	if len(providers) > 0 {
 		runArgs = append(runArgs, "-providers-stdin")

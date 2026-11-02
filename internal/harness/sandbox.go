@@ -137,8 +137,11 @@ type Sandbox struct {
 	// it (host.docker.internal:<port>), set by Configure. It's added to the
 	// proxy's allow-list; it is not the proxy's own address.
 	modelServer string
-	// allNet adds * to the proxy policy (see Options.AllNet).
-	allNet bool
+	// allowPublic adds * to the proxy policy (see Options.AllowPublic).
+	allowPublic bool
+	// allowPrivate starts the proxy with -allow-private (see
+	// Options.AllowPrivate).
+	allowPrivate bool
 	// inspect has the proxy terminate TLS for the policy's explicit hosts
 	// (see Options.NoInspect).
 	inspect bool
@@ -248,7 +251,8 @@ func newSandboxWithProfile(opts Options, profile sandboxProfile) *Sandbox {
 		profile:       profile,
 		name:          name,
 		build:         opts.Build,
-		allNet:        opts.AllNet,
+		allowPublic:   opts.AllowPublic,
+		allowPrivate:  opts.AllowPrivate,
 		inspect:       !opts.NoInspect,
 		webExpose:     opts.WebExpose && profile.webUI,
 		openWeb:       opts.WebOpen && profile.webUI,
@@ -591,7 +595,7 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		s.webPassword = password
 		webTarget = fmt.Sprintf("%s:%d", name, webSandboxPort)
 	}
-	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, s.policy(), s.inspect, providers, webTarget)
+	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, s.policy(), s.inspect, s.allowPrivate, providers, webTarget)
 	if err != nil {
 		return fmt.Errorf("starting sandbox proxy: %w", err)
 	}
@@ -701,8 +705,8 @@ func (s *Sandbox) applyModel(providerKey, modelID string) error {
 
 // policy is this session's proxy allow-list: the project's policy (or the
 // shipped defaults) plus any harness-specific endpoints, llama-server, and
-// with -all-net any public host. Built fresh each call, so sessions never share
-// or change defaultPolicy.
+// with -allow-public any public host. Built fresh each call, so sessions never
+// share or change defaultPolicy.
 func (s *Sandbox) policy() []byte {
 	var b bytes.Buffer
 	if s.customPolicy != nil {
@@ -722,8 +726,8 @@ func (s *Sandbox) policy() []byte {
 	if s.mistralKey != "" {
 		b.WriteString("\n# Mistral (RNES_MISTRAL_API_KEY is set)\napi.mistral.ai:443\n")
 	}
-	if s.allNet {
-		b.WriteString("\n# -all-net: any public host\n*\n")
+	if s.allowPublic {
+		b.WriteString("\n# -allow-public: any public host\n*\n")
 	}
 	return b.Bytes()
 }

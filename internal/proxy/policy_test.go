@@ -116,8 +116,8 @@ func TestParseUserPolicyRejectsStarAndPrivate(t *testing.T) {
 	if got := strings.Join(pol.DNSHosts(), ","); got != "pypi.org" {
 		t.Errorf("DNSHosts = %q, want only pypi.org (no-inspect entries excluded)", got)
 	}
-	if _, err := ParseUserPolicy(strings.NewReader("pypi.org:443\n*\n")); err == nil || !strings.Contains(err.Error(), "-all-net") {
-		t.Errorf("ParseUserPolicy(*) = %v, want error naming -all-net", err)
+	if _, err := ParseUserPolicy(strings.NewReader("pypi.org:443\n*\n")); err == nil || !strings.Contains(err.Error(), "-allow-public") {
+		t.Errorf("ParseUserPolicy(*) = %v, want error naming -allow-public", err)
 	}
 	if _, err := ParseUserPolicy(strings.NewReader("private host.docker.internal:8080\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Errorf("ParseUserPolicy(private) = %v, want line 1 error", err)

@@ -228,7 +228,7 @@ func TestInterceptLeavesHostsOutsideTheCAAsBlindTunnels(t *testing.T) {
 		fmt.Fprint(w, "real upstream")
 	}))
 	// The CA covers a different host, so localhost is allowed but not
-	// intercepted (what an -all-net host looks like to the CA).
+	// intercepted (what an -allow-public host looks like to the CA).
 	otherCA, err := NewCA([]string{"other.test"})
 	if err != nil {
 		t.Fatalf("NewCA: %v", err)

@@ -287,15 +287,15 @@ func TestStartProxyNetWaitsForTheProxyToListen(t *testing.T) {
 	}
 }
 
-func TestSandboxPolicyWithAllNetAllowsAnyPublicHost(t *testing.T) {
-	s := newSandbox(Options{Sandbox: true, AllNet: true}, "")
+func TestSandboxPolicyWithAllowPublicAllowsAnyPublicHost(t *testing.T) {
+	s := newSandbox(Options{Sandbox: true, AllowPublic: true}, "")
 	s.modelServer = "host.docker.internal:8080"
 	pol, err := proxy.ParsePolicy(bytes.NewReader(s.policy()))
 	if err != nil {
 		t.Fatalf("ParsePolicy(s.policy()): %v", err)
 	}
 	if !pol.AnyPublic {
-		t.Error("-all-net must allow any public host")
+		t.Error("-allow-public must allow any public host")
 	}
 	if !pol.Explicit("host.docker.internal:8080") {
 		t.Error("llama-server must stay listed explicitly: it's on the host, which * doesn't reach")
@@ -303,7 +303,7 @@ func TestSandboxPolicyWithAllNetAllowsAnyPublicHost(t *testing.T) {
 
 	plain := newSandbox(Options{Sandbox: true}, "")
 	if pol, _ := proxy.ParsePolicy(bytes.NewReader(plain.policy())); pol.AnyPublic {
-		t.Error("without -all-net the policy must not contain *")
+		t.Error("without -allow-public the policy must not contain *")
 	}
 }
 
@@ -536,7 +536,7 @@ func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 func TestStartProxyNetWebPublishesAndForwardsTheWebPort(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, map[string]string{"port ": "127.0.0.1:54321\n"})
 
-	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, nil, "rnes-sandbox:4096")
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, nil, "rnes-sandbox:4096")
 	if err != nil {
 		t.Fatalf("startProxyNetWeb: %v", err)
 	}
@@ -559,6 +559,25 @@ func TestStartProxyNetWebPublishesAndForwardsTheWebPort(t *testing.T) {
 			t.Errorf("run args missing %q: %s", want, run)
 		}
 	}
+}
+
+func TestStartProxyNetWithAllowPrivatePassesTheFlag(t *testing.T) {
+	logPath := fakeDockerProxy(t, nil, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, true, nil, "")
+	if err != nil {
+		t.Fatalf("startProxyNetWeb: %v", err)
+	}
+	defer p.stop()
+
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "run -d ") {
+			if !strings.HasSuffix(c, "rnes-proxy:test -allow-private") {
+				t.Errorf("proxy run args must end with the image and -allow-private: %s", c)
+			}
+			return
+		}
+	}
+	t.Fatal("no docker run call")
 }
 
 func TestStartProxyNetWithoutWebDoesNotPublish(t *testing.T) {

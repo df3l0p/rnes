@@ -6,7 +6,6 @@ package proxy
 
 import (
 	"crypto/tls"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -52,6 +51,11 @@ type Policy struct {
 	// the address actually dialed is public (see isPublic): the internet,
 	// but not the host machine or the LAN.
 	AnyPublic bool
+	// AnyPrivate also lets through any destination not in Allow, as long as
+	// the address actually dialed is private (RFC 1918 or IPv6 ULA, see
+	// isPrivate): the host machine and the LAN, but not the internet. Unlike
+	// a per-entry Private mark, it is not limited to the listed hosts.
+	AnyPrivate bool
 }
 
 // NewPolicy builds a Policy allowing the given "host:port" entries at public
@@ -89,8 +93,9 @@ func (p *Policy) AllowPrivate(hostports ...string) {
 	}
 }
 
-// AllowsPrivate reports whether hostport is permitted to connect to a
-// non-public address.
+// AllowsPrivate reports whether hostport itself is permitted to connect to a
+// non-public address (the per-entry "private" mark). It is not the -allow-private
+// mode, which is Policy.AnyPrivate and still scoped to private ranges.
 func (p Policy) AllowsPrivate(hostport string) bool {
 	return p.Private[strings.ToLower(hostport)]
 }
@@ -123,10 +128,11 @@ func (p Policy) Explicit(hostport string) bool {
 	return p.Allow[strings.ToLower(hostport)]
 }
 
-// Allows reports whether hostport passes the policy. With AnyPublic that's
-// every destination; the public-address check then happens when dialing.
+// Allows reports whether hostport passes the policy. With AnyPublic or
+// AnyPrivate that's every destination; the address-type check then happens
+// when dialing.
 func (p Policy) Allows(hostport string) bool {
-	return p.AnyPublic || p.Explicit(hostport)
+	return p.AnyPublic || p.AnyPrivate || p.Explicit(hostport)
 }
 
 // Server is the sandbox's egress proxy. It implements http.Handler and is
@@ -334,7 +340,7 @@ func (s *Server) handleForward(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.transportFor(target).RoundTrip(out)
 	if err != nil {
 		s.dialFailed(w, target, err)
-		if !errors.Is(err, errNotPublic) {
+		if !isAddressError(err) {
 			s.logf("rnes-proxy: %s http://%s%s -> %d (%s): %s", r.Method, target, r.URL.EscapedPath(), http.StatusBadGateway, time.Since(start).Round(time.Millisecond), err.Error())
 		}
 		return
