@@ -86,8 +86,8 @@ var privateDialer = &net.Dialer{
 	Control:   addressControl(isPrivate, errNotPrivate),
 }
 
-// publicPrivateDialer reaches explicit policy entries and -allow-public hosts
-// under -allow-private: those may be either public or private.
+// publicPrivateDialer reaches any host when both -allow-public and
+// -allow-private are on: either address type is fine.
 var publicPrivateDialer = &net.Dialer{
 	Timeout:   30 * time.Second,
 	KeepAlive: 30 * time.Second,
@@ -115,15 +115,18 @@ var (
 
 // dialerFor picks how to reach hostport: directly when the policy marks that
 // entry private; under -allow-private, through a dialer that accepts private
-// addresses (and public ones too when the host is explicit or -allow-public is
-// on); otherwise public addresses only.
+// addresses for unlisted hosts (listed hosts keep their public-only check,
+// unless -allow-public is also on); otherwise public addresses only.
 func (s *Server) dialerFor(hostport string) *net.Dialer {
 	if s.Policy.AllowsPrivate(hostport) {
 		return directDialer
 	}
 	if s.Policy.AnyPrivate {
-		if s.Policy.AnyPublic || s.Policy.Explicit(hostport) {
+		if s.Policy.AnyPublic {
 			return publicPrivateDialer
+		}
+		if s.Policy.Explicit(hostport) {
+			return publicDialer
 		}
 		return privateDialer
 	}
@@ -136,8 +139,11 @@ func (s *Server) transportFor(hostport string) *http.Transport {
 		return forwardTransport
 	}
 	if s.Policy.AnyPrivate {
-		if s.Policy.AnyPublic || s.Policy.Explicit(hostport) {
+		if s.Policy.AnyPublic {
 			return publicPrivateTransport
+		}
+		if s.Policy.Explicit(hostport) {
+			return publicTransport
 		}
 		return privateTransport
 	}

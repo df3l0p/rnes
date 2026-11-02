@@ -71,8 +71,7 @@ const logFollowGrace = 2 * time.Second
 // Sandbox.hostIP already computes for host.docker.internal). policy is the
 // proxy's allow-list, in the proxy's policy format. With inspect the proxy
 // also terminates TLS for the policy's explicit hosts: it gets a CA volume to
-// write its trust bundle to, and its log is followed into a file. With
-// allowPrivate the proxy also dials private addresses (RFC 1918 / IPv6 ULA).
+// write its trust bundle to, and its log is followed into a file.
 // providers, when non-empty, is the line of provider config rnes-proxy reads
 // from its stdin (see proxy.EncodeProviders); it requires inspect, since
 // credentials can only be injected into decrypted requests.
@@ -84,7 +83,9 @@ func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers 
 // UI: when webTarget (a host:port the proxy can dial, e.g. the sandbox's
 // name:4096) is set, the proxy listens inside its container and rnes publishes
 // that port on host loopback. The sandbox itself stays on the internal
-// network; the forwarder only dials it.
+// network; the forwarder only dials it. With allowPrivate the proxy also dials
+// private addresses (RFC 1918 / IPv6 ULA) for destinations not on the
+// allow-list.
 func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate bool, providers []byte, webTarget string) (*proxyNet, error) {
 	if len(providers) > 0 && !inspect {
 		return nil, fmt.Errorf("credential providers need TLS interception")

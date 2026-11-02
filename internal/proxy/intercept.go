@@ -155,8 +155,8 @@ func (s *Server) serveIntercepted(w http.ResponseWriter, r *http.Request, target
 
 	resp, err := s.upstream(target).RoundTrip(out)
 	if err != nil {
-		if errors.Is(err, errNotPublic) {
-			s.denied(w, target+" (not a public address)")
+		if isAddressError(err) {
+			s.dialFailed(w, target, err)
 			return http.StatusForbidden, nil
 		}
 		http.Error(w, "rnes-proxy: upstream "+target+": "+err.Error(), http.StatusBadGateway)

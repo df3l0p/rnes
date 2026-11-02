@@ -26,8 +26,8 @@ func ParsePolicy(r io.Reader) (Policy, error) {
 // explicit "host:port" or "no-inspect host:port" per line, with '#' comments
 // and blank lines ignored. Unlike ParsePolicy, it rejects "*" (wildcard public
 // egress is gated by the -allow-public CLI flag) and "private" entries (every
-// user policy host must resolve to a public address unless -allow-private is
-// passed on the command line).
+// user policy host must resolve to a public address; -allow-private grants
+// unlisted private destinations separately).
 func ParseUserPolicy(r io.Reader) (Policy, error) {
 	return parsePolicy(r, false)
 }

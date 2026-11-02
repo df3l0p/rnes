@@ -98,9 +98,10 @@ type Options struct {
 	// AllowPublic lets the sandbox reach any public host through its egress
 	// proxy, not just the allow-list.
 	AllowPublic bool
-	// AllowPrivate lets the sandbox reach any private address (RFC 1918 or
-	// IPv6 ULA) through its egress proxy, including hosts not in the
-	// allow-list. Loopback, link-local metadata and CGNAT stay blocked.
+	// AllowPrivate lets the sandbox reach private addresses (RFC 1918 or IPv6
+	// ULA) through its egress proxy for hosts not in the allow-list. Listed
+	// hosts keep their public-only check unless AllowPublic is also set.
+	// Loopback, link-local metadata and CGNAT stay blocked.
 	AllowPrivate bool
 	// NoInspect turns off TLS interception in the sandbox's egress proxy. By
 	// default the proxy terminates TLS (with a CA made for the session, which
@@ -130,7 +131,7 @@ type Options struct {
 	// Policy, when non-nil (with Sandbox), replaces the built-in default
 	// egress allow-list (e.g. from .rnes/policy.txt). An empty non-nil slice
 	// allows nothing besides this session's model provider (or any public host
-	// with AllowPublic, or any private address with AllowPrivate).
+	// with AllowPublic, or any unlisted private destination with AllowPrivate).
 	Policy []byte
 	// ModelSet reports whether -model was explicitly passed on the command
 	// line (used by harnesses whose own settings pick the model by default).

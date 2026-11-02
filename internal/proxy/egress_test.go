@@ -166,6 +166,42 @@ func TestExplicitPolicyEntryRefusesNonPublicAddresses(t *testing.T) {
 	}
 }
 
+// -allow-private opens RFC 1918/ULA, not loopback. With -allow-public too,
+// explicit hosts use the public+private dialer; the intercepted path must
+// report its refusal as a denial (403 + audit line), like CONNECT and forward
+// do, rather than falling through to a 502.
+func TestAnyPrivateInterceptRefusesLoopbackAsDenied(t *testing.T) {
+	reached := false
+	tlsHostport, upstreamTrust := newUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	ca, err := NewCA([]string{"localhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit := &auditLog{}
+	px := httptest.NewServer(&Server{
+		Policy:      Policy{AnyPrivate: true, AnyPublic: true, Allow: map[string]bool{tlsHostport: true}},
+		CA:          ca,
+		Logf:        audit.Logf,
+		UpstreamTLS: newTLSConfig(upstreamTrust),
+	})
+	defer px.Close()
+
+	resp, err := clientVia(mustParseURL(t, px.URL), poolOf(ca)).Get("https://" + tlsHostport + "/")
+	if err != nil {
+		t.Fatalf("intercepted Get: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	if reached {
+		t.Error("an intercepted loopback destination must never be reached under -allow-private")
+	}
+	if !strings.Contains(audit.String(), "denied "+tlsHostport+" (not a public or private address)") {
+		t.Errorf("audit log = %q, want a denied line with the address reason", audit.String())
+	}
+}
+
 func TestIsPrivate(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"10.1.2.3":        true,
@@ -231,8 +267,17 @@ func TestAnyPrivateAllowsAnyHostButScopesAddresses(t *testing.T) {
 	}
 
 	explicit := Policy{AnyPrivate: true, Allow: map[string]bool{"listed.example:443": true}}
-	if got := (&Server{Policy: explicit}).dialerFor("listed.example:443"); got != publicPrivateDialer {
-		t.Errorf("explicit host with -allow-private dialer = %p, want publicPrivateDialer", got)
+	if got := (&Server{Policy: explicit}).dialerFor("listed.example:443"); got != publicDialer {
+		t.Errorf("explicit host with -allow-private dialer = %p, want publicDialer (listed hosts stay public-only)", got)
+	}
+
+	listedPrivate := Policy{
+		AnyPrivate: true,
+		Allow:      map[string]bool{"internal.example:443": true},
+		Private:    map[string]bool{"internal.example:443": true},
+	}
+	if got := (&Server{Policy: listedPrivate}).dialerFor("internal.example:443"); got != directDialer {
+		t.Errorf("per-entry private host dialer = %p, want directDialer", got)
 	}
 
 	both := Policy{AnyPrivate: true, AnyPublic: true}

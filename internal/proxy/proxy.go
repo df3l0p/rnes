@@ -38,14 +38,16 @@ const defaultHalfCloseIdle = 30 * time.Second
 type Policy struct {
 	Allow map[string]bool
 	// Private names the subset of Allow entries that may connect to a
-	// non-public address (such as the host's llama-server). Every other
-	// destination — whether in Allow or matched by AnyPublic — must resolve
-	// to a public IP (see isPublic).
+	// non-public address without the normal address-type check (such as the
+	// host's llama-server). Destinations not marked private must resolve to a
+	// public IP (see isPublic); AnyPrivate additionally opens unlisted
+	// destinations at private addresses.
 	Private map[string]bool
 	// NoInspect names the subset of Allow entries whose HTTPS connections are
 	// blind-tunnelled rather than TLS-terminated, even when a session CA is
 	// configured (for endpoints using HTTP/2, gRPC, WebSockets, or certificate
-	// pinning). They still go through publicDialer unless also in Private.
+	// pinning). They still go through the normal address check unless also in
+	// Private (or both AnyPublic and AnyPrivate are set).
 	NoInspect map[string]bool
 	// AnyPublic also lets through any destination not in Allow, as long as
 	// the address actually dialed is public (see isPublic): the internet,
@@ -53,8 +55,9 @@ type Policy struct {
 	AnyPublic bool
 	// AnyPrivate also lets through any destination not in Allow, as long as
 	// the address actually dialed is private (RFC 1918 or IPv6 ULA, see
-	// isPrivate): the host machine and the LAN, but not the internet. Unlike
-	// a per-entry Private mark, it is not limited to the listed hosts.
+	// isPrivate): the host machine and the LAN, but not the internet. Explicit
+	// Allow entries keep their public-only check unless marked Private; combine
+	// with AnyPublic to allow either address type everywhere.
 	AnyPrivate bool
 }
 
