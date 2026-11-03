@@ -305,7 +305,8 @@ ownership".
     private address outside the list. Prefix an entry with `no-inspect` to
     tunnel its TLS traffic untouched instead of decrypting it (needed for
     HTTP/2, gRPC, WebSockets or certificate-pinned endpoints):
-    `no-inspect example.com:443`. Every
+    `no-inspect example.com:443`. The two prefixes can be combined in either
+    order, e.g. `no-inspect private host.docker.internal:443`. Every
     `-sandbox` run ensures `<cwd>/.rnes` exists on the host (an empty directory
     is invisible to `git status`) and mounts it read-only at
     `/workspace/.rnes` (rejecting symlinks), so an agent inside the container

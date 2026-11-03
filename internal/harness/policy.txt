@@ -8,7 +8,8 @@
 # such as a service on your machine or LAN.
 # Prefix an entry with 'no-inspect ' (e.g. 'no-inspect example.com:443') to
 # pass its TLS traffic through unread instead of decrypting it (needed for
-# HTTP/2, gRPC, WebSockets, or certificate-pinned endpoints).
+# HTTP/2, gRPC, WebSockets, or certificate-pinned endpoints). The two prefixes
+# can be combined in either order, e.g. 'no-inspect private host.docker.internal:443'.
 # Wildcard '*' is not allowed in .rnes/policy.txt; pass -allow-public on the
 # command line instead. Pass -allow-private to reach any private address
 # outside the list. Remove all entries below to restrict the sandbox to its

@@ -718,6 +718,10 @@ func (s *Sandbox) policy() []byte {
 		b.WriteString("\n" + s.profile.extraPolicy)
 	}
 	if s.modelServer != "" {
+		// The bridge gateway is normally RFC 1918 / ULA, which the scoped
+		// "private" mark allows. A custom Docker default-address-pools range
+		// outside those (e.g. CGNAT) is an unsupported niche; revisit if it
+		// comes up.
 		b.WriteString("\n# this session's llama-server\nprivate " + s.modelServer + "\n")
 	}
 	if s.openrouterKey != "" {
