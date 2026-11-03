@@ -388,8 +388,8 @@ func resolveSkills(c cliConfig, home, cwd string, stderr io.Writer) ([]skills.Sk
 	return attached, nil
 }
 
-// resolvePolicy prepares <cwd>/.rnes and loads <cwd>/.rnes/policy.txt for a
-// sandbox session, or notes that the file is ignored when running on the host.
+// resolvePolicy loads <cwd>/.rnes/policy.txt for a sandbox session, or notes
+// that the file is ignored when running on the host. It never creates .rnes.
 func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	if c.sandboxUpdate {
 		return nil, nil
@@ -402,9 +402,6 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	}
 	raw, pol, found, err := harness.LoadProjectPolicy(cwd)
 	if err != nil {
-		return nil, err
-	}
-	if _, err := harness.EnsureProjectDir(cwd); err != nil {
 		return nil, err
 	}
 	if !found {

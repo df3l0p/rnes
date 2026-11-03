@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -169,6 +170,9 @@ type Sandbox struct {
 	// customPolicy, when non-nil, replaces defaultPolicy as the base of the
 	// session's egress allow-list (see Options.Policy).
 	customPolicy []byte
+	// policyFile is the host path of <cwd>/.rnes/policy.txt when present, set
+	// by Run and mounted read-only inside the sandbox's tmpfs-backed .rnes.
+	policyFile string
 	// configHome is the host staging directory mounted at
 	// profile.skillsConfigHome when skills are attached, set by Run.
 	configHome string
@@ -504,11 +508,13 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 			return err
 		}
 	}
-	// Ensure <dir>/.rnes exists on the host (owned by the user, never a
-	// symlink) so runArgs can always bind-mount it read-only at /workspace/.rnes.
-	if _, err := EnsureProjectDir(dir); err != nil {
+	// Resolve and validate the project policy before mounting anything. A
+	// missing .rnes is fine: the sandbox shadows it with an empty tmpfs.
+	policyFile, _, err := projectPolicyPath(dir)
+	if err != nil {
 		return err
 	}
+	s.policyFile = policyFile
 
 	// Hooks and config in the shared git directory are mounted read-only
 	// below; stage the placeholders used when the host has neither.
@@ -774,10 +780,8 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 	if s.profile.usesGeneratedConfig {
 		args = append(args, "-e", "OPENCODE_CONFIG="+containerConfigPath)
 	}
-	args = append(args,
-		"-v", dir+":"+containerWorkdir,
-		"--mount", bindMount(filepath.Join(dir, ProjectStateDir), containerWorkdir+"/"+ProjectStateDir, true),
-	)
+	args = append(args, "-v", dir+":"+containerWorkdir)
+	args = append(args, s.projectStateMounts()...)
 	// A linked worktree's .git is a file pointing outside dir, so the git
 	// directory it names has to be in the container too. A normal checkout's
 	// .git is already under dir and needs nothing.
@@ -827,6 +831,22 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 	args = append(args, s.image)
 	if s.profile.containerArgs != nil {
 		args = append(args, s.profile.containerArgs(modelID, s.modelSet, s.extraArgs)...)
+	}
+	return args
+}
+
+// projectStateMounts keeps the agent out of <cwd>/.rnes without a nested bind
+// mount of the host directory. Docker Desktop for Mac locks the host directory
+// covered by such a mount with a "deny delete" ACL while the container runs; if
+// that cleanup is skipped (an interrupted session, a Docker restart), the ACL
+// stays behind and makes `git worktree remove` and `rm -rf` fail on the
+// worktree. A read-only tmpfs shadows the host .rnes just as effectively, and
+// the policy file (when present) is mounted read-only inside it.
+func (s *Sandbox) projectStateMounts() []string {
+	containerStateDir := path.Join(containerWorkdir, ProjectStateDir)
+	args := []string{"--tmpfs", containerStateDir + ":ro"}
+	if s.policyFile != "" {
+		args = append(args, "--mount", bindMount(s.policyFile, path.Join(containerStateDir, "policy.txt"), true))
 	}
 	return args
 }
@@ -962,10 +982,10 @@ func (s *Sandbox) skillMounts() []string {
 	if s.configHome == "" {
 		return nil
 	}
-	targetBase := s.profile.skillsConfigHome + "/" + s.profile.skillsRelDir
+	targetBase := path.Join(s.profile.skillsConfigHome, s.profile.skillsRelDir)
 	args := []string{"--mount", bindMount(s.configHome, s.profile.skillsConfigHome, false)}
 	for _, sk := range s.skills {
-		args = append(args, "--mount", bindMount(sk.Dir, targetBase+"/"+sk.Name, true))
+		args = append(args, "--mount", bindMount(sk.Dir, path.Join(targetBase, sk.Name), true))
 	}
 	return args
 }

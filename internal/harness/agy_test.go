@@ -149,7 +149,7 @@ func TestAgyRunArgsMountsAuthVolumeSkillsSiblingAndForwardsModelAndArgs(t *testi
 	for _, want := range []string{
 		"-v " + vol + ":/home/rnes/.gemini/antigravity-cli",
 		"-v " + vol + ":/home/rnes/.config/antigravity",
-		"--mount type=bind,source=" + filepath.Join(workdir, ".rnes") + ",target=/workspace/.rnes,readonly",
+		"--tmpfs /workspace/.rnes:ro",
 		"-v rnes-ca-1:/etc/rnes-ca:ro",
 		"-e SSL_CERT_FILE=/etc/rnes-ca/ca.pem",
 	} {

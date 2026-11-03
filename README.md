@@ -127,7 +127,10 @@ without that option (or use a newer git in the sandbox).
 
 The worktree and its branch are left in place when the session ends, so the
 next `-worktree <name>` continues where it stopped. Remove one with
-`git worktree remove .worktree/<name>` (and `git branch -d <name>`).
+`git worktree remove .worktree/<name>` (and `git branch -d <name>`). If a
+worktree created by an older rnes still has a Docker Desktop for Mac
+`deny delete` ACL on `.rnes`, clear it first with
+`chmod -N .worktree/<name>/.rnes`; new sessions don't create that ACL.
 
 Each harness owns its own config path internally (opencode's is its default
 global config, `~/.config/opencode/opencode.jsonc`) — there's no flag for it.
@@ -215,8 +218,9 @@ with an error rather than silently using the wrong model — stop it or use
 host. The llama-server still runs on the host; the sandbox container has no
 direct route to it and instead reaches it through its per-session egress
 proxy, which is what resolves `host.docker.internal`. The current directory
-is bind-mounted at `/workspace` (with `<cwd>/.rnes` mounted read-only at
-`/workspace/.rnes`), and the container runs as your uid/gid with all Linux
+is bind-mounted at `/workspace` (with `/workspace/.rnes` shadowed by a
+read-only tmpfs, and `<cwd>/.rnes/policy.txt` mounted read-only inside it when
+present), and the container runs as your uid/gid with all Linux
 capabilities dropped (`--cap-drop=ALL`) and `no-new-privileges` enabled so
 files it writes keep your ownership and SUID/capability elevation is disabled.
 Only `docker` is needed on the host (not the agent). The mounted workspace is
@@ -307,11 +311,15 @@ ownership".
     HTTP/2, gRPC, WebSockets or certificate-pinned endpoints):
     `no-inspect example.com:443`. The two prefixes can be combined in either
     order, e.g. `no-inspect private host.docker.internal:443`. Every
-    `-sandbox` run ensures `<cwd>/.rnes` exists on the host (an empty directory
-    is invisible to `git status`) and mounts it read-only at
-    `/workspace/.rnes` (rejecting symlinks), so an agent inside the container
-    can never create, edit or remove `.rnes/policy.txt`. Without `-sandbox`, an
-    existing `.rnes/policy.txt` is ignored with a note.
+    `-sandbox` run shadows `<cwd>/.rnes` with a read-only tmpfs at
+    `/workspace/.rnes` (rejecting symlinks) and, when the file exists, mounts
+    `<cwd>/.rnes/policy.txt` read-only inside it, so an agent inside the
+    container can never create, edit or remove `.rnes/policy.txt`. Sandbox
+    runs do not create `.rnes`; `-generate-policy` is the way to add one. The
+    tmpfs is deliberate: a nested bind mount of the host directory made Docker
+    Desktop for Mac leave a `deny delete` ACL on it after an interrupted
+    session, which then made `rm -rf` and `git worktree remove` fail. Without
+    `-sandbox`, an existing `.rnes/policy.txt` is ignored with a note.
   - `-allow-public` opens the sandbox up to any public host over http(s)
     instead of just the allow-list. Every destination other than llama-server —
     whether listed in `policy.txt` or opened by `-allow-public` — must still
@@ -582,10 +590,10 @@ live OAuth session is inside the sandbox, because the agent has to use it
 directly. Anything that escapes the sandbox can use that session until it
 expires or you remove the volume. The sandbox still drops all Linux
 capabilities, enables `no-new-privileges`, has no direct host route apart from
-the proxy, and mounts only the project plus (read-only) `.rnes` and attached
-skills. `-allow-public` and `-allow-private` are especially risky here — a live
-OAuth session plus arbitrary egress — so rnes prints an explicit warning when
-they are combined.
+the proxy, and mounts only the project plus a read-only `/workspace/.rnes` and
+attached skills. `-allow-public` and `-allow-private` are especially risky here
+— a live OAuth session plus arbitrary egress — so rnes prints an explicit
+warning when they are combined.
 
 **Network.** agy's Google OAuth and Antigravity endpoints are added to the
 session's allow-list as `no-inspect` entries, so their HTTP/2 and gRPC traffic

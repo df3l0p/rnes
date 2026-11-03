@@ -211,7 +211,7 @@ func TestSandboxRunArgs(t *testing.T) {
 		"-e NO_PROXY=localhost,127.0.0.1,::1",
 		"-e no_proxy=localhost,127.0.0.1,::1",
 		"-v /work/proj:/workspace",
-		"--mount type=bind,source=/work/proj/.rnes,target=/workspace/.rnes,readonly",
+		"--tmpfs /workspace/.rnes:ro",
 		"-v /tmp/gen.jsonc:/etc/rnes/opencode.jsonc:ro",
 		"-e OPENCODE_CONFIG=/etc/rnes/opencode.jsonc",
 		"rnes-sandbox-default:abc123 .",

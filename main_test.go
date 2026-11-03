@@ -385,7 +385,7 @@ func TestValidateRejectsGeneratePolicyWithSandboxUpdate(t *testing.T) {
 }
 
 func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
-	// Without .rnes/policy.txt: sandbox creates .rnes/ and returns nil policy.
+	// Without .rnes/policy.txt: sandbox returns nil policy and does not create .rnes.
 	cwd := t.TempDir()
 	var buf bytes.Buffer
 	cfg := cliConfig{sandbox: true, githubToken: "github_pat_x"}
@@ -393,8 +393,8 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	if err != nil || raw != nil || buf.Len() != 0 {
 		t.Fatalf("no policy file = (raw=%v, err=%v, out=%q)", raw, err, buf.String())
 	}
-	if fi, err := os.Lstat(filepath.Join(cwd, ".rnes")); err != nil || !fi.IsDir() {
-		t.Fatalf("expected .rnes dir created for sandbox, fi=%v err=%v", fi, err)
+	if _, err := os.Lstat(filepath.Join(cwd, ".rnes")); !os.IsNotExist(err) {
+		t.Fatalf("sandbox must not create .rnes, got err=%v", err)
 	}
 
 	// Generated starter policy prints active hosts.

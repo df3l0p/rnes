@@ -15,9 +15,12 @@ import (
 
 const (
 	// ProjectStateDir is the per-project folder inside the working directory.
-	// Sandbox sessions ensure it exists on the host (owned by the host user)
-	// and bind-mount it read-only at /workspace/.rnes so an agent inside the
-	// container can never create, edit, or remove .rnes/policy.txt.
+	// Sandbox sessions shadow it with a read-only tmpfs at /workspace/.rnes
+	// (and mount policy.txt inside it read-only when present) so an agent
+	// inside the container can never create, edit, or remove
+	// .rnes/policy.txt. A tmpfs rather than a nested bind mount keeps Docker
+	// Desktop for Mac from putting a "deny delete" ACL on the host directory,
+	// which used to make `git worktree remove` fail after a session.
 	ProjectStateDir = ".rnes"
 	// ProjectPolicyRel is the display path of a project's egress policy file.
 	ProjectPolicyRel = ".rnes/policy.txt"
@@ -83,35 +86,47 @@ func HasProjectPolicy(cwd string) bool {
 	return err == nil
 }
 
-// LoadProjectPolicy reads and validates <cwd>/.rnes/policy.txt when present.
-// When absent, found is false and raw is nil. Both .rnes and .rnes/policy.txt
-// are checked with Lstat so symlinks are rejected before anything starts.
-func LoadProjectPolicy(cwd string) (raw []byte, pol proxy.Policy, found bool, err error) {
+// projectPolicyPath returns the host path of <cwd>/.rnes/policy.txt when it
+// exists. It applies the same symlink and regular-file checks as
+// LoadProjectPolicy and never creates .rnes. found is false when either .rnes
+// or policy.txt is absent.
+func projectPolicyPath(cwd string) (path string, found bool, err error) {
 	dir := filepath.Join(cwd, ProjectStateDir)
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, proxy.Policy{}, false, nil
+			return "", false, nil
 		}
-		return nil, proxy.Policy{}, false, fmt.Errorf("checking %s: %w", ProjectStateDir, err)
+		return "", false, fmt.Errorf("checking %s: %w", ProjectStateDir, err)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return nil, proxy.Policy{}, false, fmt.Errorf("%s is a symlink; refusing to use it", ProjectStateDir)
+		return "", false, fmt.Errorf("%s is a symlink; refusing to use it", ProjectStateDir)
 	}
 	if !fi.IsDir() {
-		return nil, proxy.Policy{}, false, fmt.Errorf("%s exists and is not a directory", ProjectStateDir)
+		return "", false, fmt.Errorf("%s exists and is not a directory", ProjectStateDir)
 	}
 
-	path := filepath.Join(dir, "policy.txt")
+	path = filepath.Join(dir, "policy.txt")
 	pfi, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, proxy.Policy{}, false, nil
+			return "", false, nil
 		}
-		return nil, proxy.Policy{}, false, fmt.Errorf("checking %s: %w", ProjectPolicyRel, err)
+		return "", false, fmt.Errorf("checking %s: %w", ProjectPolicyRel, err)
 	}
 	if pfi.Mode()&os.ModeSymlink != 0 || !pfi.Mode().IsRegular() {
-		return nil, proxy.Policy{}, false, fmt.Errorf("%s must be a regular file, not a symlink", ProjectPolicyRel)
+		return "", false, fmt.Errorf("%s must be a regular file, not a symlink", ProjectPolicyRel)
+	}
+	return path, true, nil
+}
+
+// LoadProjectPolicy reads and validates <cwd>/.rnes/policy.txt when present.
+// When absent, found is false and raw is nil. Both .rnes and .rnes/policy.txt
+// are checked with Lstat so symlinks are rejected before anything starts.
+func LoadProjectPolicy(cwd string) (raw []byte, pol proxy.Policy, found bool, err error) {
+	path, found, err := projectPolicyPath(cwd)
+	if err != nil || !found {
+		return nil, proxy.Policy{}, false, err
 	}
 
 	raw, err = os.ReadFile(path)

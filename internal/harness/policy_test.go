@@ -130,7 +130,7 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 	}
 }
 
-func TestSandboxRunCreatesProjectDirAndMountsItReadOnly(t *testing.T) {
+func TestSandboxRunShadowsProjectDirWithoutCreatingIt(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
 	workdir := t.TempDir()
@@ -144,21 +144,64 @@ func TestSandboxRunCreatesProjectDirAndMountsItReadOnly(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	fi, err := os.Lstat(filepath.Join(workdir, ".rnes"))
-	if err != nil || !fi.IsDir() {
-		t.Fatalf(".rnes dir after Run: fi=%v err=%v", fi, err)
+	if _, err := os.Lstat(filepath.Join(workdir, ".rnes")); !os.IsNotExist(err) {
+		t.Errorf("Run must not create .rnes, got err=%v", err)
 	}
 
-	var foundMount bool
-	want := "source=" + filepath.Join(workdir, ".rnes") + ",target=/workspace/.rnes,readonly"
-	for _, c := range calls(t, logPath) {
-		if strings.HasPrefix(c, "run --rm") && strings.Contains(c, want) {
-			foundMount = true
+	run := sandboxRun(t, logPath)
+	if !strings.Contains(run, "--tmpfs /workspace/.rnes:ro") {
+		t.Errorf("sandbox run did not shadow .rnes with a read-only tmpfs:\n%s", run)
+	}
+	if strings.Contains(run, "source="+filepath.Join(workdir, ".rnes")+",target=/workspace/.rnes") {
+		t.Errorf("sandbox run must not bind-mount the host .rnes directory:\n%s", run)
+	}
+}
+
+func TestSandboxRunMountsPolicyFileReadOnly(t *testing.T) {
+	logPath := fakeDockerProxy(t, nil, nil)
+	t.Setenv("TMPDIR", t.TempDir())
+	workdir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workdir, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policy := filepath.Join(workdir, ".rnes", "policy.txt")
+	if err := os.WriteFile(policy, []byte("pypi.org:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newSandbox(Options{Sandbox: true, Policy: []byte("pypi.org:443\n")}, filepath.Join(t.TempDir(), "absent.jsonc"))
+	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m"}); err != nil {
+		t.Fatal(err)
+	}
+	s.image, s.proxyImage = "rnes-sandbox-default:test", "rnes-sandbox-proxy:test"
+	if err := s.Run(workdir, "llama-cpp", "m"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	run := sandboxRun(t, logPath)
+	tmpfs := "--tmpfs /workspace/.rnes:ro"
+	policyMount := "source=" + policy + ",target=/workspace/.rnes/policy.txt,readonly"
+	for _, want := range []string{tmpfs, policyMount} {
+		if !strings.Contains(run, want) {
+			t.Errorf("sandbox run missing %q:\n%s", want, run)
 		}
 	}
-	if !foundMount {
-		t.Errorf("sandbox run did not mount .rnes read-only (%s):\n%v", want, calls(t, logPath))
+	// The tmpfs has to be mounted first; the policy file lands inside it.
+	if strings.Index(run, tmpfs) > strings.Index(run, policyMount) {
+		t.Errorf("sandbox run mounts policy.txt before the tmpfs that holds it:\n%s", run)
 	}
+}
+
+// sandboxRun returns the sandbox's docker run command from the fake docker log.
+func sandboxRun(t *testing.T, logPath string) string {
+	t.Helper()
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "run --rm") {
+			return c
+		}
+	}
+	t.Fatalf("no sandbox run command in %v", calls(t, logPath))
+	return ""
 }
 
 func TestSandboxRunRefusesSymlinkProjectDir(t *testing.T) {
