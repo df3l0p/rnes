@@ -81,7 +81,7 @@ func TestAnyPublicKeepsPrivateEntries(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
 	defer backend.Close()
 
-	pol := NewPrivatePolicy([]string{mustParseURL(t, backend.URL).Host})
+	pol := NewAnyAddressPolicy([]string{mustParseURL(t, backend.URL).Host})
 	pol.AnyPublic = true
 	px := httptest.NewServer(&Server{Policy: pol})
 	defer px.Close()
@@ -136,7 +136,7 @@ func TestExplicitPolicyEntryRefusesNonPublicAddresses(t *testing.T) {
 	}
 
 	// Also check the TLS-intercepted path: an intercepted DNS name ("localhost")
-	// that resolves to 127.0.0.1 without AllowPrivate must be refused with 403.
+	// that resolves to 127.0.0.1 without a private mark must be refused with 403.
 	tlsHostport, upstreamTrust := newUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
 	ca, err := NewCA([]string{"localhost"})
 	if err != nil {
@@ -223,7 +223,7 @@ func TestIsPrivate(t *testing.T) {
 	}
 }
 
-func TestAllowPrivateDialersScopeAddresses(t *testing.T) {
+func TestPrivateDialersScopeAddresses(t *testing.T) {
 	checks := []struct {
 		name   string
 		dialer *net.Dialer
@@ -276,8 +276,16 @@ func TestAnyPrivateAllowsAnyHostButScopesAddresses(t *testing.T) {
 		Allow:      map[string]bool{"internal.example:443": true},
 		Private:    map[string]bool{"internal.example:443": true},
 	}
-	if got := (&Server{Policy: listedPrivate}).dialerFor("internal.example:443"); got != directDialer {
-		t.Errorf("per-entry private host dialer = %p, want directDialer", got)
+	if got := (&Server{Policy: listedPrivate}).dialerFor("internal.example:443"); got != publicPrivateDialer {
+		t.Errorf("per-entry private host dialer = %p, want publicPrivateDialer", got)
+	}
+
+	anyAddr := Policy{
+		Allow:      map[string]bool{"test.example:443": true},
+		AnyAddress: map[string]bool{"test.example:443": true},
+	}
+	if got := (&Server{Policy: anyAddr}).dialerFor("test.example:443"); got != anyAddressDialer {
+		t.Errorf("any-address host dialer = %p, want anyAddressDialer", got)
 	}
 
 	both := Policy{AnyPrivate: true, AnyPublic: true}

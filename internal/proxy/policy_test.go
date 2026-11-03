@@ -94,6 +94,9 @@ func TestParsePolicyPrivateEntry(t *testing.T) {
 	if !pol.Explicit("host.docker.internal:8080") || !pol.AllowsPrivate("host.docker.internal:8080") {
 		t.Errorf("private entry must be both Explicit and AllowsPrivate: %+v", pol)
 	}
+	if pol.AllowsAnyAddress("host.docker.internal:8080") {
+		t.Errorf("a policy-file private entry must not be unrestricted: %+v", pol)
+	}
 	if !pol.Explicit("github.com:443") || pol.AllowsPrivate("github.com:443") {
 		t.Errorf("ordinary entry must be Explicit and not AllowsPrivate: %+v", pol)
 	}
@@ -105,22 +108,34 @@ func TestParsePolicyPrivateEntry(t *testing.T) {
 	}
 }
 
-func TestParseUserPolicyRejectsStarAndPrivate(t *testing.T) {
-	pol, err := ParseUserPolicy(strings.NewReader("# comment\npypi.org:443\nno-inspect grpc.example.com:443\n"))
-	if err != nil || !pol.Explicit("pypi.org:443") || !pol.Explicit("grpc.example.com:443") || pol.AnyPublic || pol.AllowsPrivate("pypi.org:443") {
+func TestParseUserPolicyAcceptsPrivateAndRejectsStar(t *testing.T) {
+	pol, err := ParseUserPolicy(strings.NewReader("# comment\npypi.org:443\nprivate host.docker.internal:8080\nno-inspect grpc.example.com:443\n"))
+	if err != nil || !pol.Explicit("pypi.org:443") || !pol.Explicit("grpc.example.com:443") || pol.AnyPublic {
 		t.Fatalf("ParseUserPolicy valid = (%+v, %v)", pol, err)
+	}
+	if !pol.Explicit("host.docker.internal:8080") || !pol.AllowsPrivate("host.docker.internal:8080") {
+		t.Errorf("private entry must be Explicit and AllowsPrivate: %+v", pol)
+	}
+	if pol.AllowsAnyAddress("host.docker.internal:8080") {
+		t.Errorf("a policy file must never produce an any-address entry: %+v", pol)
+	}
+	if pol.AllowsPrivate("pypi.org:443") {
+		t.Errorf("ordinary entry must not be private: %+v", pol)
 	}
 	if !pol.SkipsInspect("grpc.example.com:443") || pol.SkipsInspect("pypi.org:443") {
 		t.Errorf("SkipsInspect mismatch: %+v", pol)
 	}
-	if got := strings.Join(pol.DNSHosts(), ","); got != "pypi.org" {
-		t.Errorf("DNSHosts = %q, want only pypi.org (no-inspect entries excluded)", got)
+	if got := strings.Join(pol.DNSHosts(), ","); got != "host.docker.internal,pypi.org" {
+		t.Errorf("DNSHosts = %q, want pypi.org and host.docker.internal (no-inspect excluded)", got)
+	}
+	if got := (&Server{Policy: pol}).dialerFor("host.docker.internal:8080"); got != publicPrivateDialer {
+		t.Errorf("private entry dialer = %p, want publicPrivateDialer", got)
 	}
 	if _, err := ParseUserPolicy(strings.NewReader("pypi.org:443\n*\n")); err == nil || !strings.Contains(err.Error(), "-allow-public") {
 		t.Errorf("ParseUserPolicy(*) = %v, want error naming -allow-public", err)
 	}
-	if _, err := ParseUserPolicy(strings.NewReader("private host.docker.internal:8080\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
-		t.Errorf("ParseUserPolicy(private) = %v, want line 1 error", err)
+	if _, err := ParseUserPolicy(strings.NewReader("private bad_port\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("ParseUserPolicy(private malformed) = %v, want line 1 error", err)
 	}
 	if _, err := ParseUserPolicy(strings.NewReader("no-inspect bad_port\n")); err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Errorf("ParseUserPolicy(no-inspect malformed) = %v, want line 1 error", err)

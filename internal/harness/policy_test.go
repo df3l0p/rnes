@@ -96,6 +96,23 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 		t.Errorf("star policy err = %v, want error naming -allow-public", err)
 	}
 
+	// A per-entry private mark is accepted, and stays scoped to private ranges
+	// (it must not become an unrestricted entry).
+	privCwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(privCwd, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privCwd, ".rnes", "policy.txt"), []byte("private host.docker.internal:5432\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, privPol, found, err := LoadProjectPolicy(privCwd)
+	if err != nil || !found {
+		t.Fatalf("private policy = (found=%v, err=%v)", found, err)
+	}
+	if !privPol.AllowsPrivate("host.docker.internal:5432") || privPol.AllowsAnyAddress("host.docker.internal:5432") {
+		t.Errorf("private policy = %+v, want a scoped private entry", privPol)
+	}
+
 	// Rejects symlinked policy.txt.
 	symFileCwd := t.TempDir()
 	if err := os.Mkdir(filepath.Join(symFileCwd, ".rnes"), 0o755); err != nil {

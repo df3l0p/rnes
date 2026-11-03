@@ -77,7 +77,7 @@ the session's generated config so it starts on it.
 | `-sandbox-update` | off                                         | Rebuild the sandbox images from scratch, then exit without running the agent (implies `-sandbox` and `-build`). Without `-harness`, rebuilds every harness's images; with it, only that harness's (and, without `-image`, every image on its base) |
 | `-generate-policy` | off                                        | Write a starter `.rnes/policy.txt` in the current directory for `-sandbox`, then exit without running the agent |
 | `-allow-public` | off                                          | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
-| `-allow-private` | off                                         | Let the sandbox reach private addresses (RFC 1918 / IPv6 ULA) outside the allow-list; listed hosts keep their public-only check (requires `-sandbox`; see below) |
+| `-allow-private` | off                                         | Let the sandbox reach private addresses (RFC 1918 / IPv6 ULA) outside the allow-list; listed hosts keep their public-only check unless marked `private` in `policy.txt` (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
 | `-web`      | off                                               | Open the session's web UI in your browser at startup; the TUI keeps running and both share one live session |
 | `-no-web`   | off                                               | Don't serve the session's web UI at all (with `-sandbox` it is exposed on a loopback port by default) |
@@ -295,12 +295,16 @@ ownership".
     `RNES_OPENROUTER_API_KEY` is set, `api.mistral.ai:443` when
     `RNES_MISTRAL_API_KEY` is set, and a cloud harness's own endpoints) and
     prints the active allow-list at startup, marking entries that skip TLS
-    interception with `(no-inspect)`; an empty `.rnes/policy.txt` restricts the
-    sandbox to those automatic entries alone. Wildcard `*` and `private` are not
-    permitted in `.rnes/policy.txt` (use `-allow-public` / `-allow-private` on
-    the command line instead). Prefix an entry with `no-inspect` to tunnel its
-    TLS traffic untouched instead of decrypting it (needed for HTTP/2, gRPC,
-    WebSockets or certificate-pinned endpoints):
+    interception with `(no-inspect)` and per-entry private ones with
+    `(private)`; an empty `.rnes/policy.txt` restricts the sandbox to those
+    automatic entries alone. Wildcard `*` is not permitted in
+    `.rnes/policy.txt` (use `-allow-public` on the command line instead).
+    Prefix an entry with `private` to let that one endpoint resolve to RFC 1918
+    / IPv6 ULA as well as a public address (e.g.
+    `private host.docker.internal:5432`); use `-allow-private` to reach any
+    private address outside the list. Prefix an entry with `no-inspect` to
+    tunnel its TLS traffic untouched instead of decrypting it (needed for
+    HTTP/2, gRPC, WebSockets or certificate-pinned endpoints):
     `no-inspect example.com:443`. Every
     `-sandbox` run ensures `<cwd>/.rnes` exists on the host (an empty directory
     is invisible to `git status`) and mounts it read-only at
@@ -319,11 +323,12 @@ ownership".
     host and the LAN. Hosts already on the allow-list keep their public-only
     address check, so an internal host is reachable through `-allow-private`
     when it is not listed in `.rnes/policy.txt` (the session's model server is
-    the exception: it is marked private automatically). Public egress stays
-    limited to the allow-list. Loopback, link-local (including cloud metadata
-    `169.254.169.254`), CGNAT / Tailscale and multicast stay blocked. Combine
-    with `-allow-public` when a session needs public and private egress
-    everywhere.
+    the exception: it is marked private automatically). To open one listed
+    endpoint instead, mark it `private host:port` in `.rnes/policy.txt`.
+    Public egress stays limited to the allow-list. Loopback, link-local
+    (including cloud metadata `169.254.169.254`), CGNAT / Tailscale and
+    multicast stay blocked. Combine with `-allow-public` when a session needs
+    public and private egress everywhere.
   - A blocked host shows up to the agent as a 403 response from `rnes-proxy`,
     and when the session ends `rnes` prints a summary of any blocked
     `host:port` attempts from the proxy log.

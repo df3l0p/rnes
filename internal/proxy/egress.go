@@ -64,9 +64,10 @@ func addressControl(allow func(net.IP) bool, err error) func(string, string, sys
 	}
 }
 
-// directDialer reaches destinations explicitly permitted to connect to any
-// address (the host's llama-server, marked "private" in the policy).
-var directDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+// anyAddressDialer reaches entries marked any-address (internal/test use): it
+// skips the address-type check entirely, loopback and link-local included. It
+// only dials; TLS interception is decided separately (see interceptable).
+var anyAddressDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
 // publicDialer reaches all other destinations — both explicit policy entries
 // and hosts allowed by *. It checks the address it's actually connecting to,
@@ -86,8 +87,8 @@ var privateDialer = &net.Dialer{
 	Control:   addressControl(isPrivate, errNotPrivate),
 }
 
-// publicPrivateDialer reaches any host when both -allow-public and
-// -allow-private are on: either address type is fine.
+// publicPrivateDialer reaches per-entry private marks and any host when both
+// -allow-public and -allow-private are on: either address type is fine.
 var publicPrivateDialer = &net.Dialer{
 	Timeout:   30 * time.Second,
 	KeepAlive: 30 * time.Second,
@@ -113,13 +114,18 @@ var (
 	publicPrivateTransport = transportWith(publicPrivateDialer)
 )
 
-// dialerFor picks how to reach hostport: directly when the policy marks that
-// entry private; under -allow-private, through a dialer that accepts private
-// addresses for unlisted hosts (listed hosts keep their public-only check,
-// unless -allow-public is also on); otherwise public addresses only.
+// dialerFor picks how to reach hostport: through the any-address dialer when
+// the entry carries the internal/test mark; through the public+private dialer
+// when it carries the per-entry private mark; under -allow-private, through a
+// dialer that accepts private addresses for unlisted hosts (listed hosts keep
+// their public-only check, unless -allow-public is also on); otherwise public
+// addresses only.
 func (s *Server) dialerFor(hostport string) *net.Dialer {
+	if s.Policy.AllowsAnyAddress(hostport) {
+		return anyAddressDialer
+	}
 	if s.Policy.AllowsPrivate(hostport) {
-		return directDialer
+		return publicPrivateDialer
 	}
 	if s.Policy.AnyPrivate {
 		if s.Policy.AnyPublic {
@@ -135,8 +141,11 @@ func (s *Server) dialerFor(hostport string) *net.Dialer {
 
 // transportFor is dialerFor for the forward path.
 func (s *Server) transportFor(hostport string) *http.Transport {
-	if s.Policy.AllowsPrivate(hostport) {
+	if s.Policy.AllowsAnyAddress(hostport) {
 		return forwardTransport
+	}
+	if s.Policy.AllowsPrivate(hostport) {
+		return publicPrivateTransport
 	}
 	if s.Policy.AnyPrivate {
 		if s.Policy.AnyPublic {

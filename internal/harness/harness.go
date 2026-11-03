@@ -100,8 +100,9 @@ type Options struct {
 	AllowPublic bool
 	// AllowPrivate lets the sandbox reach private addresses (RFC 1918 or IPv6
 	// ULA) through its egress proxy for hosts not in the allow-list. Listed
-	// hosts keep their public-only check unless AllowPublic is also set.
-	// Loopback, link-local metadata and CGNAT stay blocked.
+	// hosts keep their public-only check unless AllowPublic is also set or the
+	// entry is marked private in the policy. Loopback, link-local metadata and
+	// CGNAT stay blocked.
 	AllowPrivate bool
 	// NoInspect turns off TLS interception in the sandbox's egress proxy. By
 	// default the proxy terminates TLS (with a CA made for the session, which

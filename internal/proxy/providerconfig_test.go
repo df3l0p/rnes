@@ -108,7 +108,7 @@ func TestInjectorFromStdinLogsBoundHostsThePolicyDoesNotList(t *testing.T) {
 
 	// A host marked no-inspect is also blind-tunnelled, so credentials won't be injected there.
 	noInsp := NewPolicy([]string{"github.com:443", "api.github.com:443"})
-	noInsp.AllowNoInspect("api.github.com:443")
+	noInsp.MarkNoInspect("api.github.com:443")
 	audit3 := &auditLog{}
 	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), noInsp, audit3.Logf); err != nil {
 		t.Fatalf("InjectorFromStdin with no-inspect: %v", err)

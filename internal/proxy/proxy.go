@@ -36,13 +36,19 @@ const defaultHalfCloseIdle = 30 * time.Second
 // normalized absolute-URI request host already looks like, compared
 // case-insensitively since host names are.
 type Policy struct {
+	// Allow is the set of listed "host:port" entries. An entry is public-only
+	// unless it also carries the Private or AnyAddress mark; NoInspect only
+	// affects TLS interception.
 	Allow map[string]bool
-	// Private names the subset of Allow entries that may connect to a
-	// non-public address without the normal address-type check (such as the
-	// host's llama-server). Destinations not marked private must resolve to a
-	// public IP (see isPublic); AnyPrivate additionally opens unlisted
-	// destinations at private addresses.
+	// Private names the subset of Allow entries that may connect to a private
+	// (RFC 1918 or IPv6 ULA) address as well as a public one. This is the
+	// per-entry "private" mark in policy files, including .rnes/policy.txt.
+	// Loopback, link-local metadata and CGNAT stay blocked for these entries.
 	Private map[string]bool
+	// AnyAddress names the subset of Allow entries whose address check is
+	// skipped entirely, loopback included. It is for internal/test callers
+	// (httptest backends); a policy file never produces it.
+	AnyAddress map[string]bool
 	// NoInspect names the subset of Allow entries whose HTTPS connections are
 	// blind-tunnelled rather than TLS-terminated, even when a session CA is
 	// configured (for endpoints using HTTP/2, gRPC, WebSockets, or certificate
@@ -71,18 +77,18 @@ func NewPolicy(hostports []string) Policy {
 	return Policy{Allow: m}
 }
 
-// NewPrivatePolicy builds a Policy allowing the given "host:port" entries even
-// when they resolve to non-public addresses (e.g. loopback in tests or the
-// host's llama-server).
-func NewPrivatePolicy(hostports []string) Policy {
+// NewAnyAddressPolicy builds a Policy allowing the given "host:port" entries
+// at any address, loopback and link-local included. Tests use it for httptest
+// backends; a policy file can only grant private (RFC 1918 / ULA) addresses.
+func NewAnyAddressPolicy(hostports []string) Policy {
 	pol := NewPolicy(hostports)
-	pol.AllowPrivate(hostports...)
+	pol.MarkAnyAddress(hostports...)
 	return pol
 }
 
-// AllowPrivate marks each hostport (and adds it to Allow) as permitted to
-// dial non-public addresses.
-func (p *Policy) AllowPrivate(hostports ...string) {
+// MarkPrivate marks each hostport (and adds it to Allow) as permitted to dial
+// a private (RFC 1918 or IPv6 ULA) address as well as a public one.
+func (p *Policy) MarkPrivate(hostports ...string) {
 	if p.Allow == nil {
 		p.Allow = make(map[string]bool, len(hostports))
 	}
@@ -96,16 +102,38 @@ func (p *Policy) AllowPrivate(hostports ...string) {
 	}
 }
 
-// AllowsPrivate reports whether hostport itself is permitted to connect to a
-// non-public address (the per-entry "private" mark). It is not the -allow-private
-// mode, which is Policy.AnyPrivate and still scoped to private ranges.
+// AllowsPrivate reports whether hostport has the per-entry "private" mark: it
+// may resolve to a private address as well as a public one. It is not the
+// -allow-private mode, which is Policy.AnyPrivate and applies to unlisted hosts.
 func (p Policy) AllowsPrivate(hostport string) bool {
 	return p.Private[strings.ToLower(hostport)]
 }
 
-// AllowNoInspect marks each hostport (and adds it to Allow) as skipping TLS
+// MarkAnyAddress marks each hostport (and adds it to Allow) as permitted to
+// dial any address, loopback and link-local included. Internal/test use only.
+func (p *Policy) MarkAnyAddress(hostports ...string) {
+	if p.Allow == nil {
+		p.Allow = make(map[string]bool, len(hostports))
+	}
+	if p.AnyAddress == nil {
+		p.AnyAddress = make(map[string]bool, len(hostports))
+	}
+	for _, h := range hostports {
+		k := strings.ToLower(h)
+		p.Allow[k] = true
+		p.AnyAddress[k] = true
+	}
+}
+
+// AllowsAnyAddress reports whether hostport bypasses the address check
+// entirely (the internal/test mark).
+func (p Policy) AllowsAnyAddress(hostport string) bool {
+	return p.AnyAddress[strings.ToLower(hostport)]
+}
+
+// MarkNoInspect marks each hostport (and adds it to Allow) as skipping TLS
 // interception so CONNECT tunnels it untouched.
-func (p *Policy) AllowNoInspect(hostports ...string) {
+func (p *Policy) MarkNoInspect(hostports ...string) {
 	if p.Allow == nil {
 		p.Allow = make(map[string]bool, len(hostports))
 	}

@@ -461,6 +461,18 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	if !strings.Contains(buf.String(), "example.com:443 (no-inspect)") || !strings.Contains(buf.String(), "github.com:443") {
 		t.Errorf("startup line = %q, want example.com:443 (no-inspect) and plain github.com:443", buf.String())
 	}
+
+	// private entries are accepted from policy.txt and marked in the startup line.
+	buf.Reset()
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("private host.docker.internal:5432\npypi.org:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "host.docker.internal:5432 (private)") || !strings.Contains(buf.String(), "pypi.org:443") {
+		t.Errorf("startup line = %q, want host.docker.internal:5432 (private) and plain pypi.org:443", buf.String())
+	}
 }
 
 func TestCheckTrailingArgsRejectsPositionalsOutsideThePassthrough(t *testing.T) {

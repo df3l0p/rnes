@@ -22,7 +22,7 @@ func main() {
 	addr := flag.String("addr", ":8888", "address to listen on")
 	policyPath := flag.String("policy", "/etc/rnes-proxy/policy.txt", "path to the allow-list policy file (one host:port per line)")
 	intercept := flag.Bool("intercept", false, "terminate TLS for the hosts the policy lists explicitly, with a CA created for this run, and log each request")
-	allowPrivate := flag.Bool("allow-private", false, "also allow destinations not in the policy to resolve to a private address (RFC 1918 or IPv6 ULA); listed hosts stay public-only")
+	allowPrivate := flag.Bool("allow-private", false, "also allow destinations not in the policy to resolve to a private address (RFC 1918 or IPv6 ULA); listed hosts stay public-only unless marked private")
 	caOut := flag.String("ca-out", "/ca/ca.pem", "with -intercept: where to write the trust bundle (the system roots plus the session CA's certificate; the CA's key is never written)")
 	systemRoots := flag.String("system-roots", "/etc/ssl/certs/ca-certificates.crt", "with -intercept: the system trust roots to include in the bundle")
 	providersStdin := flag.Bool("providers-stdin", false, "with -intercept: read one line of provider config (credentials to inject) from stdin before listening")

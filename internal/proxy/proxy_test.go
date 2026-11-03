@@ -41,7 +41,7 @@ func TestHandleForwardAllowsConfiguredHost(t *testing.T) {
 	backendHost := mustParseURL(t, backend.URL).Host
 
 	audit := &auditLog{}
-	srv := &Server{Policy: NewPrivatePolicy([]string{backendHost}), Logf: audit.Logf}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{backendHost}), Logf: audit.Logf}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -105,7 +105,7 @@ func TestHandleForwardStreamsChunksWithoutBuffering(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{Policy: NewPrivatePolicy([]string{mustParseURL(t, backend.URL).Host})}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{mustParseURL(t, backend.URL).Host})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 	// Deferred after the servers, so it runs before their Close: each Close
@@ -161,7 +161,7 @@ func TestHandleForwardDropsHopByHopHeaders(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{Policy: NewPrivatePolicy([]string{mustParseURL(t, backend.URL).Host})}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{mustParseURL(t, backend.URL).Host})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -213,7 +213,7 @@ func TestHandleConnectTunnelsAllowedHost(t *testing.T) {
 		io.Copy(conn, conn) // echo
 	}()
 
-	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -269,7 +269,7 @@ func TestHandleConnectFlushesHijackBufferedBytes(t *testing.T) {
 		}
 	}()
 
-	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -365,7 +365,7 @@ func TestHandleConnectKeepsTheResponseAfterAClientHalfClose(t *testing.T) {
 		conn.Write([]byte("pong"))
 	}()
 
-	srv := &Server{Policy: NewPrivatePolicy([]string{ln.Addr().String()})}
+	srv := &Server{Policy: NewAnyAddressPolicy([]string{ln.Addr().String()})}
 	px := httptest.NewServer(srv)
 	defer px.Close()
 
@@ -412,7 +412,7 @@ func TestPolicyMatchesHostsCaseInsensitively(t *testing.T) {
 // end and its reader.
 func connectThroughProxy(t *testing.T, target string) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	px := httptest.NewServer(&Server{Policy: NewPrivatePolicy([]string{target}), HalfCloseIdle: 100 * time.Millisecond})
+	px := httptest.NewServer(&Server{Policy: NewAnyAddressPolicy([]string{target}), HalfCloseIdle: 100 * time.Millisecond})
 	t.Cleanup(px.Close)
 	conn, err := net.Dial("tcp", mustParseURL(t, px.URL).Host)
 	if err != nil {
