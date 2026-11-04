@@ -5,7 +5,10 @@
 package harness
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -84,6 +87,22 @@ func AuthVolume(h Harness, dir string) string {
 	return ""
 }
 
+// projectAuthVolume returns the deterministic per-project Docker named volume
+// holding a harness's persisted auth state for dir:
+// rnes-auth-<prefix>-<sha256(realpath(dir))[:12]>. Scoping by the canonical
+// project path prevents cross-project credential leakage.
+func projectAuthVolume(prefix, dir string) string {
+	clean := filepath.Clean(dir)
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
+	}
+	if real, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = real
+	}
+	sum := sha256.Sum256([]byte(clean))
+	return "rnes-auth-" + prefix + "-" + hex.EncodeToString(sum[:])[:12]
+}
+
 // Options selects how a harness is run.
 type Options struct {
 	// Sandbox runs the agent in a Docker container instead of on the host.
@@ -155,6 +174,7 @@ type registration struct {
 // default global config location) rather than taking one from rnes's flags.
 var registry = map[string]registration{
 	"agy":      {new: newAgy, needsModelServer: false},
+	"codex":    {new: newCodex, needsModelServer: false},
 	"opencode": {new: newOpencode, needsModelServer: true},
 }
 

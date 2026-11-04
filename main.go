@@ -291,7 +291,7 @@ Environment:
                         export RNES_GITHUB_TOKEN=$(gh auth token)
   RNES_OPENROUTER_API_KEY
                       OpenRouter API key the sandbox's proxy injects at openrouter.ai
-                      (requires -sandbox; ignored with -harness agy). The sandbox only
+                      (requires -sandbox; ignored with -harness agy and -harness codex). The sandbox only
                       ever holds a placeholder, but an agent in it can still make
                       OpenRouter calls, so use a dedicated key with a low credit limit.
                       To reuse the key opencode stores instead (shared with whatever
@@ -502,7 +502,7 @@ func listenHost(h harness.Harness, host string, hostSet bool) (string, error) {
 
 func parseFlags() (cliConfig, error) {
 	var cfg cliConfig
-	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given")
+	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy or -harness codex, forwarded as --model only when given")
 	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux; rejected for harnesses that don't use llama-server)")
 	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
 	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")

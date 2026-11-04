@@ -1,10 +1,7 @@
 package harness
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"path/filepath"
 )
 
 const (
@@ -85,13 +82,5 @@ func agyProfile() sandboxProfile {
 // holding agy's OAuth credentials and transcripts for dir. Scoping by the
 // canonical project path prevents cross-project transcript/settings leakage.
 func agyAuthVolume(dir string) string {
-	clean := filepath.Clean(dir)
-	if abs, err := filepath.Abs(clean); err == nil {
-		clean = abs
-	}
-	if real, err := filepath.EvalSymlinks(clean); err == nil {
-		clean = real
-	}
-	sum := sha256.Sum256([]byte(clean))
-	return "rnes-auth-agy-" + hex.EncodeToString(sum[:])[:12]
+	return projectAuthVolume("agy", dir)
 }

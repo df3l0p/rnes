@@ -81,7 +81,7 @@ func TestSandboxPrepare(t *testing.T) {
 		{
 			name:    "unknown image fails before docker is touched",
 			opts:    Options{Sandbox: true, Image: "nope"},
-			wantErr: "available: default",
+			wantErr: "available: codex, default",
 		},
 		{
 			name:    "internal base images are not selectable",
@@ -129,7 +129,12 @@ func TestPrepareAllHarnessesBuildsEveryHarnessBaseAndProxyOnce(t *testing.T) {
 		"info",
 		"build --no-cache -t rnes-sandbox-base-agy:",
 		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-agy:",
+		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-agy:",
+		"build --no-cache -t rnes-sandbox-base-codex:",
+		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-codex:",
+		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-codex:",
 		"build --no-cache -t rnes-sandbox-base-opencode:",
+		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-opencode:",
 		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-opencode:",
 		"build --no-cache -t rnes-sandbox-proxy:",
 	}

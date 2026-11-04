@@ -38,7 +38,7 @@ func TestNewUnknownHarnessListsAvailableNames(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error for an unregistered harness name")
 		}
-		const want = `unknown harness "nope" (available: agy, opencode)`
+		const want = `unknown harness "nope" (available: agy, codex, opencode)`
 		if err.Error() != want {
 			t.Errorf("got %q, want %q", err.Error(), want)
 		}

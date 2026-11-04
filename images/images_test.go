@@ -14,8 +14,8 @@ var validName = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*$`)
 
 func TestImageNamesAreValidDockerRepositoryNames(t *testing.T) {
 	bases := BaseNames()
-	if !reflect.DeepEqual(bases, []string{"base-agy", "base-opencode"}) {
-		t.Fatalf("BaseNames() = %v, want [base-agy base-opencode]", bases)
+	if !reflect.DeepEqual(bases, []string{"base-agy", "base-codex", "base-opencode"}) {
+		t.Fatalf("BaseNames() = %v, want [base-agy base-codex base-opencode]", bases)
 	}
 	for _, name := range append(bases, Names()...) {
 		if !validName.MatchString(name) {
@@ -64,8 +64,8 @@ func parseInstructions(src string) []instruction {
 
 func TestNamesListsOnlySelectableImages(t *testing.T) {
 	got := Names()
-	if !reflect.DeepEqual(got, []string{"default"}) {
-		t.Errorf("Names() = %v, want [default]: the base images are internal", got)
+	if !reflect.DeepEqual(got, []string{"codex", "default"}) {
+		t.Errorf("Names() = %v, want [codex default]: the base images are internal", got)
 	}
 }
 
