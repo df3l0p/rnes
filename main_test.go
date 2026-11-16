@@ -385,7 +385,7 @@ func TestValidateRejectsGeneratePolicyWithSandboxUpdate(t *testing.T) {
 }
 
 func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
-	// Without .rnes/policy.txt: sandbox returns nil policy and does not create .rnes.
+	// Without .rnes/policy.yaml: sandbox returns nil policy and does not create .rnes.
 	cwd := t.TempDir()
 	var buf bytes.Buffer
 	cfg := cliConfig{sandbox: true, githubToken: "github_pat_x"}
@@ -405,7 +405,7 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	if err != nil || raw == nil {
 		t.Fatalf("generated policy = (rawNil=%v, err=%v)", raw == nil, err)
 	}
-	if !strings.Contains(buf.String(), "rnes: sandbox policy (.rnes/policy.txt):") {
+	if !strings.Contains(buf.String(), "rnes: sandbox policy (.rnes/policy.yaml):") {
 		t.Errorf("startup output missing policy line: %q", buf.String())
 	}
 
@@ -419,11 +419,12 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	// Custom policy prints only the configured hosts (the proxy blocks any
 	// omitted provider hosts on its own, without per-provider checks in rnes).
 	buf.Reset()
-	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("pypi.org:443\n"), 0o644); err != nil {
+	const pypiPolicy = "policy: v1\nmode: allowlist\nhosts: {\"pypi.org:443\": {}}\n"
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte(pypiPolicy), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	raw, err = resolvePolicy(cfg, cwd, &buf)
-	if err != nil || string(raw) != "pypi.org:443\n" {
+	if err != nil || string(raw) != pypiPolicy {
 		t.Fatalf("pypi policy = (%q, %v)", raw, err)
 	}
 	if !strings.Contains(buf.String(), "pypi.org:443") || strings.Contains(buf.String(), "warning:") {
@@ -432,7 +433,7 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 
 	// Empty policy prints "none (model server only)".
 	buf.Reset()
-	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("# model server only\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("# model server only\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	raw, err = resolvePolicy(cliConfig{sandbox: true}, cwd, &buf)
@@ -452,7 +453,7 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 
 	// no-inspect entries are marked in the startup line.
 	buf.Reset()
-	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("no-inspect example.com:443\ngithub.com:443\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"example.com:443\": {no-inspect: true}, \"github.com:443\": {}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
@@ -462,9 +463,9 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 		t.Errorf("startup line = %q, want example.com:443 (no-inspect) and plain github.com:443", buf.String())
 	}
 
-	// private entries are accepted from policy.txt and marked in the startup line.
+	// private entries are accepted from policy.yaml and marked in the startup line.
 	buf.Reset()
-	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.txt"), []byte("private host.docker.internal:5432\npypi.org:443\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"host.docker.internal:5432\": {private: true}, \"pypi.org:443\": {}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {

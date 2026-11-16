@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/df3l0p/rnes/internal/proxy"
 	"github.com/df3l0p/rnes/internal/skills"
 )
 
@@ -670,8 +671,12 @@ func TestSandboxRunGivesTheProxyAndTheSandboxTheSamePlaceholder(t *testing.T) {
 
 func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	off := newSandbox(Options{Sandbox: true}, "")
-	if strings.Contains(string(off.policy()), "openrouter") {
-		t.Errorf("policy lists openrouter without a key:\n%s", off.policy())
+	offRaw, err := off.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(offRaw), "openrouter") {
+		t.Errorf("policy lists openrouter without a key:\n%s", offRaw)
 	}
 	if b, _ := off.providerConfig(); b != nil {
 		t.Errorf("no key must mean no provider config, got %q", b)
@@ -680,8 +685,13 @@ func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	s := newSandbox(Options{Sandbox: true, GitHubToken: "github_pat_SECRET", OpenRouterKey: "sk-or-SECRET"}, "")
 	s.githubPlaceholder, s.openrouterPlaceholder = "ph_gh", "ph_or"
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
-	if !strings.Contains(string(s.policy()), "\nopenrouter.ai:443\n") {
-		t.Errorf("policy lacks openrouter.ai:443:\n%s", s.policy())
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil || !pol.Allows("openrouter.ai:443") {
+		t.Errorf("policy lacks openrouter.ai:443:\n%s", raw)
 	}
 	b, err := s.providerConfig()
 	if err != nil || bytes.Count(b, []byte("\n")) != 1 || !strings.Contains(string(b), "sk-or-SECRET") || !strings.Contains(string(b), "github_pat_SECRET") {
@@ -696,8 +706,12 @@ func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 
 func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	off := newSandbox(Options{Sandbox: true}, "")
-	if strings.Contains(string(off.policy()), "mistral") {
-		t.Errorf("policy lists mistral without a key:\n%s", off.policy())
+	offRaw, err := off.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(offRaw), "mistral") {
+		t.Errorf("policy lists mistral without a key:\n%s", offRaw)
 	}
 	if b, _ := off.providerConfig(); b != nil {
 		t.Errorf("no key must mean no provider config, got %q", b)
@@ -706,8 +720,13 @@ func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	s := newSandbox(Options{Sandbox: true, MistralKey: "mis-SECRET"}, "")
 	s.mistralPlaceholder = "ph_mis"
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
-	if !strings.Contains(string(s.policy()), "\napi.mistral.ai:443\n") {
-		t.Errorf("policy lacks api.mistral.ai:443:\n%s", s.policy())
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil || !pol.Allows("api.mistral.ai:443") {
+		t.Errorf("policy lacks api.mistral.ai:443:\n%s", raw)
 	}
 	b, err := s.providerConfig()
 	if err != nil || bytes.Count(b, []byte("\n")) != 1 || !strings.Contains(string(b), "mis-SECRET") {

@@ -32,22 +32,25 @@ const (
 // calls against daily-cloudcode-pa.googleapis.com — so all variants are
 // allowed, not just the prod host.
 const agyExtraPolicy = `# Google Antigravity OAuth & API endpoints (HTTP/2 & gRPC passthrough)
-no-inspect accounts.google.com:443
-no-inspect oauth2.googleapis.com:443
-no-inspect www.googleapis.com:443
-no-inspect antigravity.google:443
-no-inspect antigravity.googleapis.com:443
-no-inspect antigravity-pa.googleapis.com:443
-no-inspect antigravity-unleash.goog:443
-no-inspect cloudcode-pa.googleapis.com:443
-no-inspect daily-cloudcode-pa.googleapis.com:443
-no-inspect autopush-cloudcode-pa.sandbox.googleapis.com:443
-no-inspect preprod-daily-cloudcode-pa.sandbox.googleapis.com:443
-no-inspect aicode.googleapis.com:443
-no-inspect autopush-aicode.sandbox.googleapis.com:443
-no-inspect generativelanguage.googleapis.com:443
-no-inspect businessaicode.googleapis.com:443
-no-inspect aiplatform.googleapis.com:443
+policy: v1
+mode: allowlist
+hosts:
+  "accounts.google.com:443": {no-inspect: true}
+  "oauth2.googleapis.com:443": {no-inspect: true}
+  "www.googleapis.com:443": {no-inspect: true}
+  "antigravity.google:443": {no-inspect: true}
+  "antigravity.googleapis.com:443": {no-inspect: true}
+  "antigravity-pa.googleapis.com:443": {no-inspect: true}
+  "antigravity-unleash.goog:443": {no-inspect: true}
+  "cloudcode-pa.googleapis.com:443": {no-inspect: true}
+  "daily-cloudcode-pa.googleapis.com:443": {no-inspect: true}
+  "autopush-cloudcode-pa.sandbox.googleapis.com:443": {no-inspect: true}
+  "preprod-daily-cloudcode-pa.sandbox.googleapis.com:443": {no-inspect: true}
+  "aicode.googleapis.com:443": {no-inspect: true}
+  "autopush-aicode.sandbox.googleapis.com:443": {no-inspect: true}
+  "generativelanguage.googleapis.com:443": {no-inspect: true}
+  "businessaicode.googleapis.com:443": {no-inspect: true}
+  "aiplatform.googleapis.com:443": {no-inspect: true}
 `
 
 func newAgy(opts Options) (Harness, error) {

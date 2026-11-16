@@ -130,7 +130,7 @@ type Options struct {
 	// WebOpen opens the web UI in the browser at startup. Implies WebExpose.
 	WebOpen bool
 	// Policy, when non-nil (with Sandbox), replaces the built-in default
-	// egress allow-list (e.g. from .rnes/policy.txt). An empty non-nil slice
+	// egress allow-list (e.g. from .rnes/policy.yaml). An empty non-nil slice
 	// allows nothing besides this session's model provider (or any public host
 	// with AllowPublic, or any unlisted private destination with AllowPrivate).
 	Policy []byte

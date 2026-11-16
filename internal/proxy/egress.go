@@ -71,7 +71,7 @@ var anyAddressDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * ti
 
 // publicDialer reaches all other destinations — both explicit policy entries
 // and hosts allowed by *. It checks the address it's actually connecting to,
-// after DNS resolution, so a name in policy.txt that resolves (or rebinds) to
+// after DNS resolution, so a name in policy.yaml that resolves (or rebinds) to
 // a private or link-local metadata address can't slip through.
 var publicDialer = &net.Dialer{
 	Timeout:   30 * time.Second,

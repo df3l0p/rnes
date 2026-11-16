@@ -1,0 +1,51 @@
+# Example .rnes/policy.yaml for `rnes -sandbox`.
+#
+# v1 is an allow-list: only the hosts below (plus the session's own model
+# provider and any harness-required endpoints) can be reached. Everything else
+# gets a 403 from rnes-proxy.
+#
+# Copy this file to .rnes/policy.yaml, then edit it. An empty policy restricts
+# the sandbox to its automatic entries. `rnes -generate-policy` writes a
+# starter file with the built-in package-registry defaults instead.
+#
+# The active policy here is deliberately minimal. Optional host settings are
+# shown commented out below; uncomment only what you need.
+
+policy: v1
+mode: allowlist
+
+hosts:
+  # A plain entry: port 443 on github.com, public addresses only.
+  "github.com:443": {}
+
+  # Optional: every port on one host. The address check still applies. A
+  # wildcard host is not allowed: use -allow-public on the command line for
+  # any public host.
+  # "example.com:*": {}
+
+  # Optional: let this one endpoint resolve to an RFC 1918 / IPv6 ULA address,
+  # such as a service on your machine or LAN. Loopback, link-local metadata
+  # and CGNAT stay blocked. Use -allow-private for any private address outside
+  # the list.
+  # "host.docker.internal:5432":
+  #   private: true
+
+  # Optional: blind-tunnel this endpoint's TLS instead of decrypting it (for
+  # HTTP/2, gRPC, WebSockets or certificate pinning). Its traffic is not
+  # logged request-by-request.
+  # "grpc.example.com:443":
+  #   no-inspect: true
+
+  # Optional: both marks can be combined.
+  # "host.docker.internal:8443":
+  #   private: true
+  #   no-inspect: true
+
+  # Optional: generic authentication provider metadata. `key` is the HTTP
+  # header to fill in and `value` names the host environment variable holding
+  # its value. Both must be set, and the entry must stay inspected (so don't
+  # add no-inspect). The schema reserves this for the auth-provider phase;
+  # injection is not active yet.
+  # "api.example.com:443":
+  #   key: Authorization
+  #   value: EXAMPLE_TOKEN

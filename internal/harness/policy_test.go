@@ -16,7 +16,7 @@ func TestGeneratePolicyWritesTemplateAndRefusesOverwriteOrSymlink(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GeneratePolicy: %v", err)
 	}
-	if path != filepath.Join(cwd, ".rnes", "policy.txt") {
+	if path != filepath.Join(cwd, ".rnes", "policy.yaml") {
 		t.Errorf("path = %q", path)
 	}
 
@@ -25,9 +25,9 @@ func TestGeneratePolicyWritesTemplateAndRefusesOverwriteOrSymlink(t *testing.T) 
 		t.Fatalf("LoadProjectPolicy: found=%v err=%v", found, err)
 	}
 	if !bytes.Equal(raw, defaultPolicy) {
-		t.Errorf("generated policy doesn't match policy.txt:\ngot:\n%s\nwant:\n%s", raw, defaultPolicy)
+		t.Errorf("generated policy doesn't match policy.yaml:\ngot:\n%s\nwant:\n%s", raw, defaultPolicy)
 	}
-	defPol, err := proxy.ParsePolicy(bytes.NewReader(defaultPolicy))
+	defPol, err := parsePolicyYAML(bytes.NewReader(defaultPolicy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestGeneratePolicyWritesTemplateAndRefusesOverwriteOrSymlink(t *testing.T) 
 		t.Errorf("generated policy hosts = %v, want %v\n%s", pol.SortedAllow(), defPol.SortedAllow(), raw)
 	}
 
-	// Must refuse to overwrite an existing policy.txt.
+	// Must refuse to overwrite an existing policy.yaml.
 	if _, err := GeneratePolicy(cwd); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("second GeneratePolicy = %v, want already-exists error", err)
 	}
@@ -47,6 +47,18 @@ func TestGeneratePolicyWritesTemplateAndRefusesOverwriteOrSymlink(t *testing.T) 
 	}
 	if _, err := GeneratePolicy(symCwd); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Errorf("GeneratePolicy with symlink .rnes = %v, want symlink error", err)
+	}
+
+	// Must tell an old policy.txt user how to convert, not silently ignore it.
+	legacyCwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(legacyCwd, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCwd, ".rnes", "policy.txt"), []byte("pypi.org:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GeneratePolicy(legacyCwd); err == nil || !strings.Contains(err.Error(), "policy.yaml") {
+		t.Errorf("GeneratePolicy with legacy policy.txt = %v, want a conversion error", err)
 	}
 }
 
@@ -61,13 +73,13 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 		t.Errorf("LoadProjectPolicy must not create .rnes when absent")
 	}
 
-	// Empty 0-byte .rnes/policy.txt -> found=true, non-nil empty slice (so
+	// Empty 0-byte .rnes/policy.yaml -> found=true, non-nil empty slice (so
 	// Sandbox uses it instead of falling back to defaultPolicy).
 	emptyCwd := t.TempDir()
 	if err := os.Mkdir(filepath.Join(emptyCwd, ".rnes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(emptyCwd, ".rnes", "policy.txt"), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(emptyCwd, ".rnes", "policy.yaml"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	raw, pol, found, err := LoadProjectPolicy(emptyCwd)
@@ -76,7 +88,11 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 	}
 	s := newSandbox(Options{Sandbox: true, Policy: raw}, "")
 	s.modelServer = "host.docker.internal:8080"
-	merged, err := proxy.ParsePolicy(bytes.NewReader(s.policy()))
+	mergedRaw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := proxy.ParsePolicy(bytes.NewReader(mergedRaw))
 	if err != nil {
 		t.Fatalf("ParsePolicy(merged): %v", err)
 	}
@@ -84,16 +100,16 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 		t.Errorf("empty custom policy should allow only private llama-server, got %+v", merged)
 	}
 
-	// Rejects '*' in .rnes/policy.txt.
+	// A wildcard host is not a policy entry: -allow-public owns that.
 	starCwd := t.TempDir()
 	if err := os.Mkdir(filepath.Join(starCwd, ".rnes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(starCwd, ".rnes", "policy.txt"), []byte("*\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(starCwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"*:*\": {}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := LoadProjectPolicy(starCwd); err == nil || !strings.Contains(err.Error(), "-allow-public") {
-		t.Errorf("star policy err = %v, want error naming -allow-public", err)
+	if _, _, _, err := LoadProjectPolicy(starCwd); err == nil || !strings.Contains(err.Error(), "wildcard host") {
+		t.Errorf("star policy err = %v, want a wildcard-host error", err)
 	}
 
 	// A per-entry private mark is accepted, and stays scoped to private ranges
@@ -102,7 +118,7 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(privCwd, ".rnes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(privCwd, ".rnes", "policy.txt"), []byte("private host.docker.internal:5432\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(privCwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"host.docker.internal:5432\": {private: true}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, privPol, found, err := LoadProjectPolicy(privCwd)
@@ -113,20 +129,58 @@ func TestLoadProjectPolicyHandlesAbsentEmptyCustomAndInvalid(t *testing.T) {
 		t.Errorf("private policy = %+v, want a scoped private entry", privPol)
 	}
 
-	// Rejects symlinked policy.txt.
+	// Wildcard ports and auth metadata are accepted from the project file.
+	richCwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(richCwd, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const rich = `policy: v1
+mode: allowlist
+hosts:
+  "example.com:*":
+    key: Authorization
+    value: EXAMPLE_TOKEN
+`
+	if err := os.WriteFile(filepath.Join(richCwd, ".rnes", "policy.yaml"), []byte(rich), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, richPol, found, err := LoadProjectPolicy(richCwd)
+	if err != nil || !found {
+		t.Fatalf("rich policy = (found=%v, err=%v)", found, err)
+	}
+	if !richPol.Allows("example.com:8443") {
+		t.Error("wildcard port must be accepted from a project policy")
+	}
+	if got, ok := richPol.AuthFor("example.com:8443"); !ok || got.Key != "Authorization" || got.Value != "EXAMPLE_TOKEN" {
+		t.Errorf("auth metadata = (%+v, %v)", got, ok)
+	}
+
+	// Rejects symlinked policy.yaml.
 	symFileCwd := t.TempDir()
 	if err := os.Mkdir(filepath.Join(symFileCwd, ".rnes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	secret := filepath.Join(t.TempDir(), "secret")
-	if err := os.WriteFile(secret, []byte("github.com:443\n"), 0o600); err != nil {
+	if err := os.WriteFile(secret, []byte("policy: v1\nmode: allowlist\nhosts: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(secret, filepath.Join(symFileCwd, ".rnes", "policy.txt")); err != nil {
+	if err := os.Symlink(secret, filepath.Join(symFileCwd, ".rnes", "policy.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := LoadProjectPolicy(symFileCwd); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Errorf("symlink policy.txt err = %v, want symlink error", err)
+		t.Errorf("symlink policy.yaml err = %v, want symlink error", err)
+	}
+
+	// A legacy policy.txt is an error, not a silent fallback to defaults.
+	legacyCwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(legacyCwd, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCwd, ".rnes", "policy.txt"), []byte("pypi.org:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := LoadProjectPolicy(legacyCwd); err == nil || !strings.Contains(err.Error(), "policy.yaml") {
+		t.Errorf("legacy policy.txt err = %v, want a conversion error", err)
 	}
 }
 
@@ -164,12 +218,12 @@ func TestSandboxRunMountsPolicyFileReadOnly(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(workdir, ".rnes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	policy := filepath.Join(workdir, ".rnes", "policy.txt")
-	if err := os.WriteFile(policy, []byte("pypi.org:443\n"), 0o644); err != nil {
+	policy := filepath.Join(workdir, ".rnes", "policy.yaml")
+	if err := os.WriteFile(policy, []byte("policy: v1\nmode: allowlist\nhosts: {\"pypi.org:443\": {}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	s := newSandbox(Options{Sandbox: true, Policy: []byte("pypi.org:443\n")}, filepath.Join(t.TempDir(), "absent.jsonc"))
+	s := newSandbox(Options{Sandbox: true, Policy: []byte("policy: v1\nmode: allowlist\nhosts: {\"pypi.org:443\": {}}\n")}, filepath.Join(t.TempDir(), "absent.jsonc"))
 	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m"}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +234,7 @@ func TestSandboxRunMountsPolicyFileReadOnly(t *testing.T) {
 
 	run := sandboxRun(t, logPath)
 	tmpfs := "--tmpfs /workspace/.rnes:ro"
-	policyMount := "source=" + policy + ",target=/workspace/.rnes/policy.txt,readonly"
+	policyMount := "source=" + policy + ",target=/workspace/.rnes/policy.yaml,readonly"
 	for _, want := range []string{tmpfs, policyMount} {
 		if !strings.Contains(run, want) {
 			t.Errorf("sandbox run missing %q:\n%s", want, run)
@@ -188,7 +242,7 @@ func TestSandboxRunMountsPolicyFileReadOnly(t *testing.T) {
 	}
 	// The tmpfs has to be mounted first; the policy file lands inside it.
 	if strings.Index(run, tmpfs) > strings.Index(run, policyMount) {
-		t.Errorf("sandbox run mounts policy.txt before the tmpfs that holds it:\n%s", run)
+		t.Errorf("sandbox run mounts policy.yaml before the tmpfs that holds it:\n%s", run)
 	}
 }
 

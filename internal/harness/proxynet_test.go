@@ -24,7 +24,7 @@ func fakeDockerProxy(t *testing.T, exitFor map[string]int, stdoutFor map[string]
 func TestStartProxyNetCreatesNetworkThenContainerThenConnectsBridge(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", []byte("host.docker.internal:8080\n"), false, nil)
+	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", []byte(`{"policy":"v1","mode":"allowlist","hosts":{"host.docker.internal:8080":{}}}`), false, nil)
 	if err != nil {
 		t.Fatalf("startProxyNet: %v", err)
 	}
@@ -73,8 +73,8 @@ func TestStartProxyNetCreatesNetworkThenContainerThenConnectsBridge(t *testing.T
 			if !strings.Contains(c, "--add-host host.docker.internal:172.17.0.1") {
 				t.Errorf("proxy run args missing the host add-host: %s", c)
 			}
-			if !strings.Contains(c, ":/etc/rnes-proxy/policy.txt:ro") {
-				t.Errorf("proxy run args missing the policy.txt mount: %s", c)
+			if !strings.Contains(c, ":/etc/rnes-proxy/policy.json:ro") {
+				t.Errorf("proxy run args missing the policy.json mount: %s", c)
 			}
 			if !strings.Contains(c, "rnes-proxy:test") {
 				t.Errorf("proxy run args missing the image: %s", c)
@@ -93,7 +93,7 @@ func TestStartProxyNetCreatesNetworkThenContainerThenConnectsBridge(t *testing.T
 
 func TestStartProxyNetWritesThePolicyFile(t *testing.T) {
 	fakeDockerProxy(t, nil, nil)
-	policy := []byte("# comment\nhost.docker.internal:8080\n")
+	policy := []byte(`{"policy":"v1","mode":"allowlist","hosts":{"host.docker.internal:8080":{}}}`)
 	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", policy, false, nil)
 	if err != nil {
 		t.Fatalf("startProxyNet: %v", err)
@@ -176,11 +176,11 @@ func TestStartProxyNetSurfacesDockerStderr(t *testing.T) {
 }
 
 // The shipped defaults must parse with the proxy's own parser: a typo in
-// policy.txt would otherwise only surface as a proxy that fails to start.
+// policy.yaml would otherwise only surface as a proxy that fails to start.
 func TestDefaultPolicyParses(t *testing.T) {
-	pol, err := proxy.ParsePolicy(bytes.NewReader(defaultPolicy))
+	pol, err := parsePolicyYAML(bytes.NewReader(defaultPolicy))
 	if err != nil {
-		t.Fatalf("policy.txt: %v", err)
+		t.Fatalf("policy.yaml: %v", err)
 	}
 	for _, want := range []string{
 		"registry.npmjs.org:443", "github.com:443", "models.dev:443",
@@ -203,7 +203,7 @@ func TestDefaultPolicyParses(t *testing.T) {
 }
 
 func TestDefaultPolicyListsTheGitHubProviderHostsExplicitly(t *testing.T) {
-	pol, err := proxy.ParsePolicy(bytes.NewReader(defaultPolicy))
+	pol, err := parsePolicyYAML(bytes.NewReader(defaultPolicy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,9 +221,13 @@ func TestDefaultPolicyListsTheGitHubProviderHostsExplicitly(t *testing.T) {
 func TestSandboxPolicyIsDefaultsPlusModelServer(t *testing.T) {
 	s := newSandbox(Options{Sandbox: true}, "")
 	s.modelServer = "host.docker.internal:8080"
-	pol, err := proxy.ParsePolicy(bytes.NewReader(s.policy()))
+	raw, err := s.policy()
 	if err != nil {
-		t.Fatalf("ParsePolicy(s.policy()): %v", err)
+		t.Fatalf("policy(): %v", err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ParsePolicy(policy()): %v", err)
 	}
 	for _, want := range []string{"host.docker.internal:8080", "registry.npmjs.org:443", "github.com:443", "models.dev:443", "models.opencode.ai:443", "opencode.ai:443"} {
 		if !pol.Allows(want) {
@@ -233,8 +237,14 @@ func TestSandboxPolicyIsDefaultsPlusModelServer(t *testing.T) {
 	// Building one session's policy must not change the shared defaults.
 	s2 := newSandbox(Options{Sandbox: true}, "")
 	s2.modelServer = "host.docker.internal:9090"
-	s2.policy()
-	if bytes.Contains(s.policy(), []byte("9090")) || bytes.Contains(defaultPolicy, []byte("9090")) {
+	if _, err := s2.policy(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("9090")) || bytes.Contains(defaultPolicy, []byte("9090")) {
 		t.Error("one session's model server leaked into another's policy")
 	}
 }
@@ -243,13 +253,13 @@ func TestSandboxPolicyIsDefaultsPlusModelServer(t *testing.T) {
 // only clue why) and clean up, instead of starting a sandbox whose every
 // request would then fail.
 func TestStartProxyNetFailsWithTheProxyOutputWhenItExitsAtStartup(t *testing.T) {
-	const why = "rnes-proxy: parsing policy file /etc/rnes-proxy/policy.txt: line 3: \"github.com\" is not host:port"
+	const why = `rnes-proxy: parsing policy file /etc/rnes-proxy/policy.json: hosts["github.com"]: "github.com" is not host:port`
 	logPath := fakeDockerOutput(t, nil, map[string]string{"logs": why, "inspect -f": "false"})
 	_, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
 	if err == nil {
 		t.Fatal("expected an error when the proxy container exits at startup")
 	}
-	if !strings.Contains(err.Error(), "line 3") {
+	if !strings.Contains(err.Error(), "not host:port") {
 		t.Errorf("error = %v, want it to include the proxy's output", err)
 	}
 	var removedContainer, removedNetwork bool
@@ -287,23 +297,34 @@ func TestStartProxyNetWaitsForTheProxyToListen(t *testing.T) {
 	}
 }
 
-func TestSandboxPolicyWithAllowPublicAllowsAnyPublicHost(t *testing.T) {
+func TestSandboxPolicyWithAllowPublicIsAProxyFlagNotAFileEntry(t *testing.T) {
 	s := newSandbox(Options{Sandbox: true, AllowPublic: true}, "")
 	s.modelServer = "host.docker.internal:8080"
-	pol, err := proxy.ParsePolicy(bytes.NewReader(s.policy()))
+	raw, err := s.policy()
 	if err != nil {
-		t.Fatalf("ParsePolicy(s.policy()): %v", err)
+		t.Fatal(err)
 	}
-	if !pol.AnyPublic {
-		t.Error("-allow-public must allow any public host")
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ParsePolicy(policy()): %v", err)
+	}
+	if pol.AnyPublic {
+		t.Error("-allow-public must not be written into the policy file")
 	}
 	if !pol.Explicit("host.docker.internal:8080") {
-		t.Error("llama-server must stay listed explicitly: it's on the host, which * doesn't reach")
+		t.Error("llama-server must stay listed explicitly: it's on the host, which -allow-public doesn't reach")
+	}
+	if bytes.Contains(raw, []byte(`"*`)) {
+		t.Errorf("policy file must not contain a wildcard host:\n%s", raw)
 	}
 
 	plain := newSandbox(Options{Sandbox: true}, "")
-	if pol, _ := proxy.ParsePolicy(bytes.NewReader(plain.policy())); pol.AnyPublic {
-		t.Error("without -allow-public the policy must not contain *")
+	plainRaw, err := plain.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol, _ := proxy.ParsePolicy(bytes.NewReader(plainRaw)); pol.AnyPublic {
+		t.Error("without -allow-public the policy must not contain any-public")
 	}
 }
 
@@ -536,7 +557,7 @@ func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 func TestStartProxyNetWebPublishesAndForwardsTheWebPort(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, map[string]string{"port ": "127.0.0.1:54321\n"})
 
-	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, nil, "rnes-sandbox:4096")
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "rnes-sandbox:4096")
 	if err != nil {
 		t.Fatalf("startProxyNetWeb: %v", err)
 	}
@@ -563,7 +584,7 @@ func TestStartProxyNetWebPublishesAndForwardsTheWebPort(t *testing.T) {
 
 func TestStartProxyNetWithAllowPrivatePassesTheFlag(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
-	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, true, nil, "")
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, true, false, nil, "")
 	if err != nil {
 		t.Fatalf("startProxyNetWeb: %v", err)
 	}
@@ -573,6 +594,25 @@ func TestStartProxyNetWithAllowPrivatePassesTheFlag(t *testing.T) {
 		if strings.HasPrefix(c, "run -d ") {
 			if !strings.HasSuffix(c, "rnes-proxy:test -allow-private") {
 				t.Errorf("proxy run args must end with the image and -allow-private: %s", c)
+			}
+			return
+		}
+	}
+	t.Fatal("no docker run call")
+}
+
+func TestStartProxyNetWithAllowPublicPassesTheFlag(t *testing.T) {
+	logPath := fakeDockerProxy(t, nil, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, true, nil, "")
+	if err != nil {
+		t.Fatalf("startProxyNetWeb: %v", err)
+	}
+	defer p.stop()
+
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "run -d ") {
+			if !strings.HasSuffix(c, "rnes-proxy:test -allow-public") {
+				t.Errorf("proxy run args must end with the image and -allow-public: %s", c)
 			}
 			return
 		}

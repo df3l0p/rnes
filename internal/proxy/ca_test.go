@@ -198,10 +198,7 @@ func writeRoots(t *testing.T, content string) string {
 }
 
 func TestTrustBundleReturnsACAAndItsBundleWhenThereIsAHostToIntercept(t *testing.T) {
-	pol, err := ParsePolicy(strings.NewReader("github.com:443\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	pol := mustPolicy(t, `{"policy":"v1","mode":"allowlist","hosts":{"github.com:443":{}}}`)
 	other, _ := NewCA([]string{"models.dev"}) // stands in for a system root
 	roots := writeRoots(t, string(other.CertPEM()))
 
@@ -227,10 +224,7 @@ func TestTrustBundleReturnsACAAndItsBundleWhenThereIsAHostToIntercept(t *testing
 func TestTrustBundleReturnsSystemRootsAloneWhenNothingIsIntercepted(t *testing.T) {
 	// Every allowed host skips inspection, so there is no CA at all — but the
 	// bundle must still validate real upstream certificates.
-	pol, err := ParsePolicy(strings.NewReader("no-inspect grpc.example.com:443\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	pol := mustPolicy(t, `{"policy":"v1","mode":"allowlist","hosts":{"grpc.example.com:443":{"no-inspect":true}}}`)
 	other, _ := NewCA([]string{"models.dev"}) // stands in for a system root
 	// Without the trailing newline, to pin TrustBundle's normalization to
 	// CA.Bundle's.
@@ -273,17 +267,18 @@ func TestBundleFailsWithoutSystemRoots(t *testing.T) {
 }
 
 func TestPolicyDNSHosts(t *testing.T) {
-	pol, err := ParsePolicy(strings.NewReader(`
-github.com:443
-Models.dev:443
-github.com:8443
-10.0.0.1:443
-[::1]:443
-host.docker.internal:8080
-`))
-	if err != nil {
-		t.Fatalf("ParsePolicy: %v", err)
-	}
+	pol := mustPolicy(t, `{
+  "policy": "v1",
+  "mode": "allowlist",
+  "hosts": {
+    "github.com:443": {},
+    "Models.dev:443": {},
+    "github.com:8443": {},
+    "10.0.0.1:443": {},
+    "[::1]:443": {},
+    "host.docker.internal:8080": {}
+  }
+}`)
 	got := pol.DNSHosts()
 	want := []string{"github.com", "host.docker.internal", "models.dev"}
 	if !reflect.DeepEqual(got, want) {

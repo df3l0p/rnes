@@ -24,9 +24,9 @@ const proxyReadyLine = "rnes-proxy: listening on"
 const proxyReadyTimeout = 10 * time.Second
 
 // defaultPolicy is what every sandbox may reach besides its llama-server, in
-// the proxy's policy format (see proxy.ParsePolicy).
+// the user-facing YAML policy format (parsed on the host by parsePolicyYAML).
 //
-//go:embed policy.txt
+//go:embed policy.yaml
 var defaultPolicy []byte
 
 // proxyNet is one session's dedicated egress path: an --internal Docker
@@ -69,24 +69,25 @@ const logFollowGrace = 2 * time.Second
 // startProxyNet creates this session's network and proxy container. hostIP
 // is the address the proxy container uses to reach the host (the same value
 // Sandbox.hostIP already computes for host.docker.internal). policy is the
-// proxy's allow-list, in the proxy's policy format. With inspect the proxy
-// also terminates TLS for the policy's explicit hosts: it gets a CA volume to
-// write its trust bundle to, and its log is followed into a file.
+// proxy's allow-list, in the proxy's internal JSON format. With inspect the
+// proxy also terminates TLS for the policy's explicit hosts: it gets a CA
+// volume to write its trust bundle to, and its log is followed into a file.
 // providers, when non-empty, is the line of provider config rnes-proxy reads
 // from its stdin (see proxy.EncodeProviders); it requires inspect, since
 // credentials can only be injected into decrypted requests.
 func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers []byte) (*proxyNet, error) {
-	return startProxyNetWeb(image, hostIP, policy, inspect, false, providers, "")
+	return startProxyNetWeb(image, hostIP, policy, inspect, false, false, providers, "")
 }
 
 // startProxyNetWeb is startProxyNet plus an optional TCP forward for the web
 // UI: when webTarget (a host:port the proxy can dial, e.g. the sandbox's
 // name:4096) is set, the proxy listens inside its container and rnes publishes
 // that port on host loopback. The sandbox itself stays on the internal
-// network; the forwarder only dials it. With allowPrivate the proxy also dials
-// private addresses (RFC 1918 / IPv6 ULA) for destinations not on the
+// network; the forwarder only dials it. With allowPublic the proxy also allows
+// any public destination not on the allow-list; with allowPrivate it also
+// dials private addresses (RFC 1918 / IPv6 ULA) for destinations not on the
 // allow-list.
-func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate bool, providers []byte, webTarget string) (*proxyNet, error) {
+func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate, allowPublic bool, providers []byte, webTarget string) (*proxyNet, error) {
 	if len(providers) > 0 && !inspect {
 		return nil, fmt.Errorf("credential providers need TLS interception")
 	}
@@ -134,7 +135,7 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges:true",
 		"--add-host", containerHost + ":" + hostIP,
-		"-v", policyPath + ":/etc/rnes-proxy/policy.txt:ro",
+		"-v", policyPath + ":/etc/rnes-proxy/policy.json:ro",
 	}
 	if webTarget != "" {
 		// The proxy is on the default bridge (it joins the internal network
@@ -158,6 +159,9 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate
 	}
 	if allowPrivate {
 		runArgs = append(runArgs, "-allow-private")
+	}
+	if allowPublic {
+		runArgs = append(runArgs, "-allow-public")
 	}
 	if len(providers) > 0 {
 		runArgs = append(runArgs, "-providers-stdin")
@@ -280,10 +284,10 @@ func (p *proxyNet) waitReady() error {
 
 // writePolicyFile writes policy to a temp file readable inside the proxy
 // container (0644, since --cap-drop=ALL drops CAP_DAC_READ_SEARCH and the file
-// holds only host:port entries, never secrets), returning its path. The caller
-// owns cleanup.
+// holds only policy entries and environment-variable names, never secrets),
+// returning its path. The caller owns cleanup.
 func writePolicyFile(policy []byte) (string, error) {
-	f, err := os.CreateTemp("", "rnes-proxy-policy-*.txt")
+	f, err := os.CreateTemp("", "rnes-proxy-policy-*.json")
 	if err != nil {
 		return "", fmt.Errorf("creating proxy policy file: %w", err)
 	}
