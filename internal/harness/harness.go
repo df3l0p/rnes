@@ -84,6 +84,15 @@ func AuthVolume(h Harness, dir string) string {
 	return ""
 }
 
+// Environment variables that supply the session credentials the built-in
+// policy entries use. main captures and unsets them before anything starts;
+// their values travel in Options.Secrets, keyed by these same names.
+const (
+	EnvGitHubToken      = "RNES_GITHUB_TOKEN"
+	EnvOpenRouterAPIKey = "RNES_OPENROUTER_API_KEY"
+	EnvMistralAPIKey    = "RNES_MISTRAL_API_KEY"
+)
+
 // Options selects how a harness is run.
 type Options struct {
 	// Sandbox runs the agent in a Docker container instead of on the host.
@@ -110,15 +119,11 @@ type Options struct {
 	// logs each request; with NoInspect every HTTPS connection is tunnelled
 	// unread, as before.
 	NoInspect bool
-	// GitHubToken, when set (with Sandbox), is injected by the sandbox's proxy
-	// into requests to GitHub; the sandbox itself only gets a placeholder.
-	GitHubToken string
-	// OpenRouterKey, when set (with Sandbox), is injected by the sandbox's proxy
-	// into requests to openrouter.ai; the sandbox itself only gets a placeholder.
-	OpenRouterKey string
-	// MistralKey, when set (with Sandbox), is injected by the sandbox's proxy
-	// into requests to api.mistral.ai; the sandbox itself only gets a placeholder.
-	MistralKey string
+	// Secrets maps a credential's environment variable name, as a policy
+	// key/value entry's value names it, to its value. main captures the RNES_*
+	// variables here and unsets them before anything starts; a project policy
+	// may name any other host variable, which secretFor reads at run time.
+	Secrets map[string]string
 	// Skills are host skills to mount read-only into the sandbox, where the
 	// active harness looks for global skills (with Sandbox; see package skills).
 	Skills []skills.Skill

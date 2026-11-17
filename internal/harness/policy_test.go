@@ -140,6 +140,7 @@ hosts:
   "example.com:*":
     key: Authorization
     value: EXAMPLE_TOKEN
+    format: Bearer {value}
 `
 	if err := os.WriteFile(filepath.Join(richCwd, ".rnes", "policy.yaml"), []byte(rich), 0o644); err != nil {
 		t.Fatal(err)
@@ -151,7 +152,7 @@ hosts:
 	if !richPol.Allows("example.com:8443") {
 		t.Error("wildcard port must be accepted from a project policy")
 	}
-	if got, ok := richPol.AuthFor("example.com:8443"); !ok || got.Key != "Authorization" || got.Value != "EXAMPLE_TOKEN" {
+	if got, ok := richPol.AuthFor("example.com:8443"); !ok || got.Key != "Authorization" || got.Value != "EXAMPLE_TOKEN" || got.Format != "Bearer {value}" {
 		t.Errorf("auth metadata = (%+v, %v)", got, ok)
 	}
 

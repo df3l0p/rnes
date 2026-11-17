@@ -186,12 +186,21 @@ func TestDefaultPolicyParses(t *testing.T) {
 		"registry.npmjs.org:443", "github.com:443", "models.dev:443",
 		"models.opencode.ai:443", "opencode.ai:443",
 		"api.github.com:443",
+		"openrouter.ai:443", "api.mistral.ai:443",
 		"proxy.golang.org:443", "sum.golang.org:443",
 		"pypi.org:443", "files.pythonhosted.org:443",
 		"crates.io:443", "static.crates.io:443",
 	} {
 		if !pol.Allows(want) {
 			t.Errorf("default policy doesn't allow %s", want)
+		}
+	}
+	for hp, want := range map[string]proxy.AuthConfig{
+		"openrouter.ai:443":  {Key: "Authorization", Value: "RNES_OPENROUTER_API_KEY", Format: "Bearer {value}"},
+		"api.mistral.ai:443": {Key: "Authorization", Value: "RNES_MISTRAL_API_KEY", Format: "Bearer {value}"},
+	} {
+		if got, ok := pol.AuthFor(hp); !ok || got != want {
+			t.Errorf("default policy auth for %s = (%+v, %v), want %+v", hp, got, ok, want)
 		}
 	}
 	// Not needed by git or gh through the provider; kept out until something is.
@@ -266,7 +275,7 @@ hosts:
 `
 	s := newSandbox(Options{Sandbox: true, Policy: []byte(userPolicy)}, "")
 	s.modelServer = "host.docker.internal:8080"
-	s.openrouterKey = "sk-or-test"
+	s.secrets = map[string]string{EnvOpenRouterAPIKey: "sk-or-test"}
 	raw, err := s.policy()
 	if err != nil {
 		t.Fatal(err)
@@ -519,10 +528,10 @@ func TestStartProxyNetWithInspectFollowsTheProxyLogIntoAFile(t *testing.T) {
 	}
 }
 
-func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
+func TestStartProxyNetSendsCredentialsOnStdinAndNeverInArgv(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	line, err := proxy.EncodeProviders([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_SECRET", Placeholder: "rnes_placeholder_1"}})
+	line, err := proxy.EncodeCredentials([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_SECRET", Placeholder: "rnes_placeholder_1"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,8 +556,8 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 			connectIdx = i
 		}
 	}
-	if !strings.Contains(runCall, " -i ") || !strings.HasSuffix(runCall, "rnes-proxy:test -intercept -providers-stdin") {
-		t.Errorf("run args = %q, want -i before the image and -intercept -providers-stdin after it", runCall)
+	if !strings.Contains(runCall, " -i ") || !strings.HasSuffix(runCall, "rnes-proxy:test -intercept -credentials-stdin") {
+		t.Errorf("run args = %q, want -i before the image and -intercept -credentials-stdin after it", runCall)
 	}
 	if !strings.Contains(attachCall, "--sig-proxy=false") || !strings.HasSuffix(attachCall, p.container) {
 		t.Errorf("attach args = %q", attachCall)
@@ -561,7 +570,7 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 	}
 }
 
-func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
+func TestStartProxyNetWithoutCredentialsDoesNotAttachOrOpenStdin(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
 	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
@@ -573,13 +582,13 @@ func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
 		if strings.HasPrefix(c, "attach ") {
 			t.Errorf("unexpected docker attach: %s", c)
 		}
-		if strings.HasPrefix(c, "run -d ") && (strings.Contains(c, " -i ") || strings.Contains(c, "-providers-stdin")) {
+		if strings.HasPrefix(c, "run -d ") && (strings.Contains(c, " -i ") || strings.Contains(c, "-credentials-stdin")) {
 			t.Errorf("run args must be unchanged without providers: %s", c)
 		}
 	}
 }
 
-func TestStartProxyNetRefusesProvidersWithoutInspect(t *testing.T) {
+func TestStartProxyNetRefusesCredentialsWithoutInspect(t *testing.T) {
 	fakeDockerProxy(t, nil, nil)
 	if _, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, []byte("x\n"), ""); err == nil {
 		t.Fatal("want an error: credentials can't be injected without decrypting")
@@ -591,7 +600,7 @@ func TestStartProxyNetRefusesProvidersWithoutInspect(t *testing.T) {
 func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 	fakeDockerOutput(t, map[string]int{"attach": 1}, map[string]string{"logs": "", "inspect": "true"})
 	t.Setenv("TMPDIR", t.TempDir())
-	line, _ := proxy.EncodeProviders([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+	line, _ := proxy.EncodeCredentials([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}}, nil)
 
 	start := time.Now()
 	_, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, line, "")

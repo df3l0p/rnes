@@ -475,16 +475,19 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 		t.Errorf("startup line = %q, want host.docker.internal:5432 (private) and plain pypi.org:443", buf.String())
 	}
 
-	// Auth metadata is schema-only for now, so startup says it is inert.
+	// Auth metadata is active, and startup names the header and source variable
+	// (never the secret).
 	buf.Reset()
-	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"api.example.com:443\": {key: Authorization, value: EXAMPLE_TOKEN}}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"api.example.com:443\": {key: Authorization, value: EXAMPLE_TOKEN, format: \"Bearer {value}\"}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "no credential injection is active yet") {
-		t.Errorf("startup output = %q, want a note that auth metadata is inert", buf.String())
+	for _, want := range []string{"auth: api.example.com:443", "Authorization", "EXAMPLE_TOKEN", "Bearer {value}"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("startup output = %q, want it to mention %q", buf.String(), want)
+		}
 	}
 
 	// Host mode notes a legacy policy.txt instead of silently ignoring it.

@@ -1,7 +1,7 @@
 // Package proxy implements the sandbox's egress forward proxy: a host
 // allow/blocklist first, with TLS interception (see CA and handleIntercept)
-// for the hosts the policy lists explicitly, and credential injection to be
-// layered on top in a later phase.
+// for the hosts the policy lists explicitly, and credential injection for
+// those intercepted requests (see Injector).
 package proxy
 
 import (
@@ -58,9 +58,10 @@ type Policy struct {
 	// credentials (Auth) can't be no-inspect: injection needs decryption.
 	NoInspect map[string]bool
 	// Auth holds the optional credential-injection metadata for Allow entries:
-	// the HTTP header to fill in and the environment variable that supplies
-	// its value. rnes-proxy does not inject these yet; the schema is the
-	// foundation for generic authentication providers.
+	// the HTTP header to fill in, the environment variable that supplies the
+	// secret, and how the secret is written into that header. The proxy only
+	// receives the secret values at startup (see InjectorFromStdin); the
+	// policy file itself names variables, never secrets.
 	Auth map[string]AuthConfig
 	// AnyPublic also lets through any destination not in Allow, as long as
 	// the address actually dialed is public (see isPublic): the internet,
@@ -76,11 +77,23 @@ type Policy struct {
 
 // AuthConfig is one host's optional credential-injection metadata. Key is the
 // HTTP header to set (for example "Authorization"), and Value names the
-// environment variable holding the secret to put in it. The proxy only ever
-// reads Value's name from the policy; the secret itself stays out of the file.
+// environment variable holding the secret to put in it. Format says how the
+// secret is written, with AuthValuePlaceholder standing for it (for example
+// "Bearer {value}"); empty means the secret alone. The proxy only ever reads
+// Value's name from the policy; the secret itself stays out of the file.
 type AuthConfig struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
+	Format string
+}
+
+// HeaderValue renders the header value for secret: Format with the placeholder
+// replaced, or the secret alone when no Format is set.
+func (a AuthConfig) HeaderValue(secret string) string {
+	if a.Format == "" {
+		return secret
+	}
+	return strings.ReplaceAll(a.Format, AuthValuePlaceholder, secret)
 }
 
 // entryKey returns the Allow key that covers hostport: an exact entry when one

@@ -74,10 +74,12 @@ type sandboxProfile struct {
 	// usesGeneratedConfig is true.
 	hostConfig string
 	// openRouterEnv is the container env var set to openrouterPlaceholder when
-	// OpenRouterKey is active (e.g. "OPENROUTER_API_KEY" for opencode).
+	// the RNES_OPENROUTER_API_KEY secret is active (e.g. "OPENROUTER_API_KEY"
+	// for opencode).
 	openRouterEnv string
-	// mistralEnv is the container env var set to mistralPlaceholder when
-	// MistralKey is active (e.g. "MISTRAL_API_KEY" for opencode).
+	// mistralEnv is the container env var set to mistralPlaceholder when the
+	// RNES_MISTRAL_API_KEY secret is active (e.g. "MISTRAL_API_KEY" for
+	// opencode).
 	mistralEnv string
 	// extraPolicy is merged into the session's proxy policy (e.g. agy's
 	// no-inspect Google endpoints).
@@ -155,16 +157,17 @@ type Sandbox struct {
 	// webPassword is the server password for this session's web UI, set by
 	// Run when web is on.
 	webPassword string
-	// githubToken is the real token, held only to hand to the proxy; the sandbox
-	// container never sees it. githubPlaceholder stands in for it there.
-	githubToken       string
+	// secrets holds the captured RNES_* credentials by the environment variable
+	// name a policy entry's value uses, so both the provider and the generic
+	// key/value path resolve them the same way.
+	secrets map[string]string
+	// githubPlaceholder stands in for the GitHub token in the sandbox container;
+	// the real token is only in secrets.
 	githubPlaceholder string
-	// openrouterKey and openrouterPlaceholder are the same for OpenRouter.
-	openrouterKey         string
+	// openrouterPlaceholder and mistralPlaceholder stand in for those cloud keys
+	// in the sandbox; their real values are only in secrets.
 	openrouterPlaceholder string
-	// mistralKey and mistralPlaceholder are the same for the Mistral API.
-	mistralKey         string
-	mistralPlaceholder string
+	mistralPlaceholder    string
 	// skills are mounted read-only under profile.skillsConfigHome.
 	skills []skills.Skill
 	// customPolicy, when non-nil, replaces defaultPolicy as the base of the
@@ -252,23 +255,21 @@ func newSandboxWithProfile(opts Options, profile sandboxProfile) *Sandbox {
 		name = images.Default
 	}
 	return &Sandbox{
-		profile:       profile,
-		name:          name,
-		build:         opts.Build,
-		allowPublic:   opts.AllowPublic,
-		allowPrivate:  opts.AllowPrivate,
-		inspect:       !opts.NoInspect,
-		webExpose:     opts.WebExpose && profile.webUI,
-		openWeb:       opts.WebOpen && profile.webUI,
-		githubToken:   opts.GitHubToken,
-		openrouterKey: opts.OpenRouterKey,
-		mistralKey:    opts.MistralKey,
-		skills:        opts.Skills,
-		customPolicy:  opts.Policy,
-		hostConfig:    profile.hostConfig,
-		hostIP:        "host-gateway",
-		modelSet:      opts.ModelSet,
-		extraArgs:     opts.Args,
+		profile:      profile,
+		name:         name,
+		build:        opts.Build,
+		allowPublic:  opts.AllowPublic,
+		allowPrivate: opts.AllowPrivate,
+		inspect:      !opts.NoInspect,
+		webExpose:    opts.WebExpose && profile.webUI,
+		openWeb:      opts.WebOpen && profile.webUI,
+		secrets:      opts.Secrets,
+		skills:       opts.Skills,
+		customPolicy: opts.Policy,
+		hostConfig:   profile.hostConfig,
+		hostIP:       "host-gateway",
+		modelSet:     opts.ModelSet,
+		extraArgs:    opts.Args,
 	}
 }
 
@@ -480,7 +481,7 @@ func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) erro
 		var proxied, lost []string
 		for _, id := range dropped {
 			switch {
-			case id == "openrouter" && s.openrouterKey != "", id == "mistral" && s.mistralKey != "":
+			case id == "openrouter" && s.secrets[EnvOpenRouterAPIKey] != "", id == "mistral" && s.secrets[EnvMistralAPIKey] != "":
 				proxied = append(proxied, id)
 			default:
 				lost = append(lost, id)
@@ -582,30 +583,26 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		}()
 	}
 
-	if s.githubToken != "" {
+	if s.secrets[EnvGitHubToken] != "" {
 		placeholder, err := newPlaceholder()
 		if err != nil {
 			return err
 		}
 		s.githubPlaceholder = placeholder
 	}
-	if s.openrouterKey != "" {
+	if s.secrets[EnvOpenRouterAPIKey] != "" {
 		placeholder, err := newPlaceholder()
 		if err != nil {
 			return err
 		}
 		s.openrouterPlaceholder = placeholder
 	}
-	if s.mistralKey != "" {
+	if s.secrets[EnvMistralAPIKey] != "" {
 		placeholder, err := newPlaceholder()
 		if err != nil {
 			return err
 		}
 		s.mistralPlaceholder = placeholder
-	}
-	providers, err := s.providerConfig()
-	if err != nil {
-		return err
 	}
 	// Unique per invocation so parallel sessions never collide, whatever port
 	// they share. Named before the proxy starts because the web forward
@@ -629,7 +626,11 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	if err != nil {
 		return err
 	}
-	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, policy, s.inspect, s.allowPrivate, s.allowPublic, providers, webTarget)
+	credentials, err := s.credentials(policy)
+	if err != nil {
+		return err
+	}
+	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, policy, s.inspect, s.allowPrivate, s.allowPublic, credentials, webTarget)
 	if err != nil {
 		return fmt.Errorf("starting sandbox proxy: %w", err)
 	}
@@ -765,11 +766,20 @@ func (s *Sandbox) policy() ([]byte, error) {
 		// comes up.
 		pol.MarkPrivate(s.modelServer)
 	}
-	if s.openrouterKey != "" {
-		pol.Add("openrouter.ai:443")
+	// The built-in defaults already carry these entries, but a custom project
+	// policy may not. With a key set, make sure the session can actually use it,
+	// while leaving an explicit exact entry (and its own auth settings) alone.
+	// Adding an exact entry also beats a user's "host:*" wildcard, so that can't
+	// turn this host into a no-inspect tunnel where injection is impossible.
+	if s.secrets[EnvOpenRouterAPIKey] != "" {
+		if _, ok := pol.Auth["openrouter.ai:443"]; !ok {
+			pol.SetAuth("openrouter.ai:443", openRouterAuth)
+		}
 	}
-	if s.mistralKey != "" {
-		pol.Add("api.mistral.ai:443")
+	if s.secrets[EnvMistralAPIKey] != "" {
+		if _, ok := pol.Auth["api.mistral.ai:443"]; !ok {
+			pol.SetAuth("api.mistral.ai:443", mistralAuth)
+		}
 	}
 	return proxy.MarshalPolicy(pol)
 }
@@ -1103,23 +1113,40 @@ func (s *Sandbox) writeSkillCommands(home string, names []string) {
 	fmt.Fprintf(os.Stderr, "rnes: skill commands: /%s\n", strings.Join(names, ", /"))
 }
 
-// providerConfig is the line of provider config for rnes-proxy's stdin, or nil
-// when the session has no credentials.
-func (s *Sandbox) providerConfig() ([]byte, error) {
+// credentials is the line of credential config for rnes-proxy's stdin, or nil
+// when the session has no credentials. Provider placeholders and the values of
+// the policy's key/value environment variables travel here, never in a docker
+// argument or environment variable.
+func (s *Sandbox) credentials(policyJSON []byte) ([]byte, error) {
 	var cfgs []proxy.ProviderConfig
-	if s.githubToken != "" {
-		cfgs = append(cfgs, proxy.ProviderConfig{Name: "github", Token: s.githubToken, Placeholder: s.githubPlaceholder})
+	if token := s.secrets[EnvGitHubToken]; token != "" {
+		cfgs = append(cfgs, proxy.ProviderConfig{Name: "github", Token: token, Placeholder: s.githubPlaceholder})
 	}
-	if s.openrouterKey != "" {
-		cfgs = append(cfgs, proxy.ProviderConfig{Name: "openrouter", Token: s.openrouterKey, Placeholder: s.openrouterPlaceholder})
+	pol, err := proxy.ParsePolicy(bytes.NewReader(policyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("parsing the session policy for credentials: %w", err)
 	}
-	if s.mistralKey != "" {
-		cfgs = append(cfgs, proxy.ProviderConfig{Name: "mistral", Token: s.mistralKey, Placeholder: s.mistralPlaceholder})
+	secrets := map[string]string{}
+	for _, auth := range pol.Auth {
+		if secret := s.secretFor(auth.Value); secret != "" {
+			secrets[auth.Value] = secret
+		}
 	}
-	if len(cfgs) == 0 {
+	if len(cfgs) == 0 && len(secrets) == 0 {
 		return nil, nil
 	}
-	return proxy.EncodeProviders(cfgs)
+	return proxy.EncodeCredentials(cfgs, secrets)
+}
+
+// secretFor resolves the environment variable a policy auth entry names. The
+// RNES_* session variables are captured and unset by main before the harness
+// runs, so they come from Options.Secrets; any other name is read from the host
+// environment.
+func (s *Sandbox) secretFor(env string) string {
+	if secret := s.secrets[env]; secret != "" {
+		return secret
+	}
+	return os.Getenv(env)
 }
 
 // githubEnv is what makes gh and git use the placeholder: gh reads GH_TOKEN, and

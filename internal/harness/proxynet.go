@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/df3l0p/rnes/internal/proxy"
 )
 
 const proxyListenAddr = "8888"
@@ -28,6 +30,22 @@ const proxyReadyTimeout = 10 * time.Second
 //
 //go:embed policy.yaml
 var defaultPolicy []byte
+
+// The cloud model providers' policy auth entries. Their clients send a plain
+// Bearer header, so a key/value/format entry is enough; only GitHub needs a
+// placeholder provider (git uses HTTP Basic).
+var (
+	openRouterAuth = proxy.AuthConfig{
+		Key:    "Authorization",
+		Value:  "RNES_OPENROUTER_API_KEY",
+		Format: "Bearer " + proxy.AuthValuePlaceholder,
+	}
+	mistralAuth = proxy.AuthConfig{
+		Key:    "Authorization",
+		Value:  "RNES_MISTRAL_API_KEY",
+		Format: "Bearer " + proxy.AuthValuePlaceholder,
+	}
+)
 
 // proxyNet is one session's dedicated egress path: an --internal Docker
 // network only the proxy container can escape (it also joins the default
@@ -47,9 +65,9 @@ type proxyNet struct {
 	// closed once it has exited.
 	logFollower *exec.Cmd
 	followDone  chan struct{}
-	// attach is the `docker attach` delivering the provider config on the proxy
-	// container's stdin; nil when there is none. attachDone receives its exit
-	// error (nil for a clean exit) once it has ended.
+	// attach is the `docker attach` delivering the credential config on the
+	// proxy container's stdin; nil when there is none. attachDone receives its
+	// exit error (nil for a clean exit) once it has ended.
 	attach     *exec.Cmd
 	attachDone chan error
 	// forwardHostPort is the host loopback port published for the web
@@ -74,18 +92,18 @@ const logFollowGrace = 2 * time.Second
 // volume to write its trust bundle to, and its log is followed into a file.
 // With allowPrivate the proxy also dials private addresses (RFC 1918 / IPv6
 // ULA) for destinations not on the allow-list; with allowPublic it also allows
-// any public destination not on the allow-list. providers, when non-empty, is
-// the line of provider config rnes-proxy reads from its stdin (see
-// proxy.EncodeProviders); it requires inspect, since credentials can only be
+// any public destination not on the allow-list. credentials, when non-empty,
+// is the line of credential config rnes-proxy reads from its stdin (see
+// proxy.EncodeCredentials); it requires inspect, since credentials can only be
 // injected into decrypted requests.
 //
 // When webTarget (a host:port the proxy can dial, e.g. the sandbox's
 // name:4096) is set, the proxy listens inside its container and rnes publishes
 // that port on host loopback. The sandbox itself stays on the internal
 // network; the forwarder only dials it.
-func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate, allowPublic bool, providers []byte, webTarget string) (*proxyNet, error) {
-	if len(providers) > 0 && !inspect {
-		return nil, fmt.Errorf("credential providers need TLS interception")
+func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate, allowPublic bool, credentials []byte, webTarget string) (*proxyNet, error) {
+	if len(credentials) > 0 && !inspect {
+		return nil, fmt.Errorf("credentials need TLS interception")
 	}
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
@@ -145,8 +163,8 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate
 	if inspect {
 		runArgs = append(runArgs, "-v", p.caVolume+":"+proxyCAMount)
 	}
-	if len(providers) > 0 {
-		// Keep stdin open: the provider config is attached to it below.
+	if len(credentials) > 0 {
+		// Keep stdin open: the credential config is attached to it below.
 		runArgs = append(runArgs, "-i")
 	}
 	runArgs = append(runArgs, image)
@@ -159,8 +177,8 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate
 	if allowPublic {
 		runArgs = append(runArgs, "-allow-public")
 	}
-	if len(providers) > 0 {
-		runArgs = append(runArgs, "-providers-stdin")
+	if len(credentials) > 0 {
+		runArgs = append(runArgs, "-credentials-stdin")
 	}
 	if webTarget != "" {
 		runArgs = append(runArgs, "-forward", ":"+strconv.Itoa(proxyForwardPort)+"="+webTarget)
@@ -170,12 +188,13 @@ func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate
 		return nil, fmt.Errorf("starting proxy container: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	if len(providers) > 0 {
-		// The container reads its provider config from stdin before it listens.
-		// Sent through docker attach so the secret is in no argv, env or file.
-		// --sig-proxy=false: rnes's own Ctrl+C must not be forwarded to the proxy.
+	if len(credentials) > 0 {
+		// The container reads its credential config from stdin before it
+		// listens. Sent through docker attach so the secret is in no argv, env
+		// or file. --sig-proxy=false: rnes's own Ctrl+C must not be forwarded to
+		// the proxy.
 		cmd := exec.Command("docker", "attach", "--sig-proxy=false", p.container)
-		cmd.Stdin = bytes.NewReader(providers)
+		cmd.Stdin = bytes.NewReader(credentials)
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		if err := cmd.Start(); err != nil {
 			p.stop()

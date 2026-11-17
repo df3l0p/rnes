@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Policy file schema version and mode. v1 supports allow-lists only; the mode
@@ -31,13 +32,19 @@ type Entry struct {
 	Private bool `json:"private,omitempty" yaml:"private,omitempty"`
 	// NoInspect blind-tunnels this endpoint's TLS instead of decrypting it.
 	NoInspect bool `json:"no-inspect,omitempty" yaml:"no-inspect,omitempty"`
-	// Key is the HTTP header to fill in for a generic authentication provider.
-	// Value names the environment variable holding the secret to put in it.
-	// Both must be set together. Injection is reserved for the auth-provider
-	// phase; parsing them now is the schema foundation.
+	// Key is the HTTP header the proxy fills in for a generic authentication
+	// provider. Value names the environment variable holding the secret to put
+	// in it. Both must be set together.
 	Key   string `json:"key,omitempty" yaml:"key,omitempty"`
 	Value string `json:"value,omitempty" yaml:"value,omitempty"`
+	// Format is how the secret is written into the header, with {value} standing
+	// for the secret (for example "Bearer {value}"). Empty means the secret
+	// alone. It needs Key and Value.
+	Format string `json:"format,omitempty" yaml:"format,omitempty"`
 }
+
+// AuthValuePlaceholder is replaced by the secret in AuthConfig.Format.
+const AuthValuePlaceholder = "{value}"
 
 // policyDocument is the internal JSON shape rnes writes for rnes-proxy. The
 // user-facing file is YAML; the host parses and validates it, then renders
@@ -114,6 +121,9 @@ func BuildPolicy(version, mode string, hosts map[string]Entry) (Policy, error) {
 		if entry.NoInspect {
 			pol.MarkNoInspect(normalized)
 		}
+		if entry.Format != "" && (entry.Key == "" || entry.Value == "") {
+			return Policy{}, fmt.Errorf("hosts[%q]: format needs key and value", hp)
+		}
 		if (entry.Key == "") != (entry.Value == "") {
 			return Policy{}, fmt.Errorf("hosts[%q]: key and value must be set together", hp)
 		}
@@ -127,7 +137,15 @@ func BuildPolicy(version, mode string, hosts map[string]Entry) (Policy, error) {
 			if err := validateEnvVar(entry.Value); err != nil {
 				return Policy{}, fmt.Errorf("hosts[%q]: value: %w", hp, err)
 			}
-			pol.SetAuth(normalized, AuthConfig{Key: entry.Key, Value: entry.Value})
+			if entry.Format != "" {
+				if err := validateHeaderValue(entry.Format); err != nil {
+					return Policy{}, fmt.Errorf("hosts[%q]: format: %w", hp, err)
+				}
+				if strings.Count(entry.Format, AuthValuePlaceholder) != 1 {
+					return Policy{}, fmt.Errorf("hosts[%q]: format must contain %q exactly once", hp, AuthValuePlaceholder)
+				}
+			}
+			pol.SetAuth(normalized, AuthConfig{Key: entry.Key, Value: entry.Value, Format: entry.Format})
 		}
 	}
 	return pol, nil
@@ -171,6 +189,20 @@ func validateHeaderName(s string) error {
 	return nil
 }
 
+// validateHeaderValue rejects control characters, which could otherwise
+// smuggle a second header line into the request.
+func validateHeaderValue(s string) error {
+	if s == "" {
+		return errors.New("the value is empty")
+	}
+	for _, r := range s {
+		if r == '\r' || r == '\n' || r == 0 || unicode.IsControl(r) {
+			return fmt.Errorf("%q contains a control character", s)
+		}
+	}
+	return nil
+}
+
 // validateEnvVar accepts a shell-style environment variable name, which is
 // what value names; it never contains the secret itself.
 func validateEnvVar(s string) error {
@@ -196,6 +228,17 @@ func validateEnvVar(s string) error {
 func (p Policy) SortedAllow() []string {
 	out := make([]string, 0, len(p.Allow))
 	for hp := range p.Allow {
+		out = append(out, hp)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SortedAuthHosts lists the "host:port" entries that have key/value auth
+// metadata, in sorted order.
+func (p Policy) SortedAuthHosts() []string {
+	out := make([]string, 0, len(p.Auth))
+	for hp := range p.Auth {
 		out = append(out, hp)
 	}
 	sort.Strings(out)
@@ -233,6 +276,7 @@ func (p Policy) Entries() map[string]Entry {
 			NoInspect: p.NoInspect[hp],
 			Key:       p.Auth[hp].Key,
 			Value:     p.Auth[hp].Value,
+			Format:    p.Auth[hp].Format,
 		}
 	}
 	return out
