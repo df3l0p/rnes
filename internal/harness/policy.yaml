@@ -16,10 +16,14 @@
 #   no-inspect: true    pass its TLS traffic through unread instead of
 #                       decrypting it (needed for HTTP/2, gRPC, WebSockets, or
 #                       certificate-pinned endpoints).
-#   key: Authorization   HTTP header to fill in for a generic auth provider
-#   value: GITHUB_TOKEN  env var holding that header's value; both must be set
-#                        together, and the entry must be inspected. Injection
-#                        is reserved for the auth provider phase.
+#   key: Authorization   HTTP header the proxy fills in for a generic auth
+#                        provider; value names the host environment variable
+#                        holding the secret. Both must be set together, and the
+#                        entry must be inspected.
+#   format: Bearer {value}
+#                        how the secret is written into that header; {value} is
+#                        the secret. Optional: without it, the header value is
+#                        the secret alone.
 #
 # Pass -allow-private to reach any private address outside the list. Remove
 # all hosts to restrict the sandbox to its model provider only.
@@ -34,6 +38,18 @@ hosts:
   # GitHub: git over https, and the API that gh uses
   "github.com:443": {}
   "api.github.com:443": {}
+
+  # Cloud model providers: when the matching RNES_* variable is set, the proxy
+  # fills in the Authorization header with the key as a Bearer token. The
+  # sandbox only ever holds a placeholder.
+  "openrouter.ai:443":
+    key: Authorization
+    value: RNES_OPENROUTER_API_KEY
+    format: Bearer {value}
+  "api.mistral.ai:443":
+    key: Authorization
+    value: RNES_MISTRAL_API_KEY
+    format: Bearer {value}
 
   # opencode's model catalog and website, fetched at startup
   "models.dev:443": {}

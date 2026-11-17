@@ -568,7 +568,7 @@ func TestNewPlaceholderIsRandomAndTokenShapedEnough(t *testing.T) {
 }
 
 func TestRunArgsGiveTheSandboxOnlyThePlaceholder(t *testing.T) {
-	s := newSandbox(Options{Sandbox: true, GitHubToken: "github_pat_SECRET"}, "")
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvGitHubToken: "github_pat_SECRET"}}, "")
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
 	s.githubPlaceholder = "rnes_placeholder_abc"
 	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
@@ -615,10 +615,10 @@ func TestRunArgsWithoutAGitHubTokenTrustTheWorkspaceButSetNoGitHubEnv(t *testing
 	}
 }
 
-func TestProviderConfigCarriesTheTokenAndPlaceholder(t *testing.T) {
-	s := newSandbox(Options{Sandbox: true, GitHubToken: "github_pat_SECRET"}, "")
+func TestCredentialsCarryTheTokenAndPlaceholder(t *testing.T) {
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvGitHubToken: "github_pat_SECRET"}}, "")
 	s.githubPlaceholder = "rnes_placeholder_abc"
-	b, err := s.providerConfig()
+	b, err := s.credentials(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +626,7 @@ func TestProviderConfigCarriesTheTokenAndPlaceholder(t *testing.T) {
 		t.Errorf("config = %s", b)
 	}
 	none := newSandbox(Options{Sandbox: true}, "")
-	if b, _ := none.providerConfig(); b != nil {
+	if b, _ := none.credentials(nil); b != nil {
 		t.Errorf("no token must mean no provider config, got %q", b)
 	}
 }
@@ -636,7 +636,7 @@ func TestProviderConfigCarriesTheTokenAndPlaceholder(t *testing.T) {
 func TestSandboxRunGivesTheProxyAndTheSandboxTheSamePlaceholder(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	s := newSandbox(Options{Sandbox: true, GitHubToken: "github_pat_SECRET"}, filepath.Join(t.TempDir(), "absent.jsonc"))
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvGitHubToken: "github_pat_SECRET"}}, filepath.Join(t.TempDir(), "absent.jsonc"))
 	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m"}); err != nil {
 		t.Fatal(err)
 	}
@@ -675,14 +675,20 @@ func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(offRaw), "openrouter") {
-		t.Errorf("policy lists openrouter without a key:\n%s", offRaw)
+	offPol, err := proxy.ParsePolicy(bytes.NewReader(offRaw))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if b, _ := off.providerConfig(); b != nil {
-		t.Errorf("no key must mean no provider config, got %q", b)
+	// The defaults carry the auth entry so a key works out of the box; without
+	// a key no secret is sent and the proxy just forwards the request.
+	if a, ok := offPol.AuthFor("openrouter.ai:443"); !ok || a.Key != "Authorization" || a.Value != "RNES_OPENROUTER_API_KEY" || a.Format != "Bearer {value}" {
+		t.Errorf("default openrouter auth = (%+v, %v):\n%s", a, ok, offRaw)
+	}
+	if b, _ := off.credentials(offRaw); b != nil {
+		t.Errorf("no key must mean no credentials, got %q", b)
 	}
 
-	s := newSandbox(Options{Sandbox: true, GitHubToken: "github_pat_SECRET", OpenRouterKey: "sk-or-SECRET"}, "")
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvGitHubToken: "github_pat_SECRET", EnvOpenRouterAPIKey: "sk-or-SECRET"}}, "")
 	s.githubPlaceholder, s.openrouterPlaceholder = "ph_gh", "ph_or"
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
 	raw, err := s.policy()
@@ -693,9 +699,9 @@ func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil || !pol.Allows("openrouter.ai:443") {
 		t.Errorf("policy lacks openrouter.ai:443:\n%s", raw)
 	}
-	b, err := s.providerConfig()
+	b, err := s.credentials(raw)
 	if err != nil || bytes.Count(b, []byte("\n")) != 1 || !strings.Contains(string(b), "sk-or-SECRET") || !strings.Contains(string(b), "github_pat_SECRET") {
-		t.Errorf("one line with both providers wanted, got %q, %v", b, err)
+		t.Errorf("one line with the GitHub provider and both secrets wanted, got %q, %v", b, err)
 	}
 	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
 	joined := strings.Join(s.runArgs("rnes-1-aa", "/work/proj", pn, false), " ")
@@ -710,14 +716,18 @@ func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(offRaw), "mistral") {
-		t.Errorf("policy lists mistral without a key:\n%s", offRaw)
+	offPol, err := proxy.ParsePolicy(bytes.NewReader(offRaw))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if b, _ := off.providerConfig(); b != nil {
-		t.Errorf("no key must mean no provider config, got %q", b)
+	if a, ok := offPol.AuthFor("api.mistral.ai:443"); !ok || a.Key != "Authorization" || a.Value != "RNES_MISTRAL_API_KEY" || a.Format != "Bearer {value}" {
+		t.Errorf("default mistral auth = (%+v, %v):\n%s", a, ok, offRaw)
+	}
+	if b, _ := off.credentials(offRaw); b != nil {
+		t.Errorf("no key must mean no credentials, got %q", b)
 	}
 
-	s := newSandbox(Options{Sandbox: true, MistralKey: "mis-SECRET"}, "")
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvMistralAPIKey: "mis-SECRET"}}, "")
 	s.mistralPlaceholder = "ph_mis"
 	s.image, s.generated = "rnes-sandbox-default:x", "/tmp/cfg"
 	raw, err := s.policy()
@@ -728,9 +738,9 @@ func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil || !pol.Allows("api.mistral.ai:443") {
 		t.Errorf("policy lacks api.mistral.ai:443:\n%s", raw)
 	}
-	b, err := s.providerConfig()
+	b, err := s.credentials(raw)
 	if err != nil || bytes.Count(b, []byte("\n")) != 1 || !strings.Contains(string(b), "mis-SECRET") {
-		t.Errorf("one line with the mistral provider wanted, got %q, %v", b, err)
+		t.Errorf("one line with the mistral secret wanted, got %q, %v", b, err)
 	}
 	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
 	joined := strings.Join(s.runArgs("rnes-1-aa", "/work/proj", pn, false), " ")
@@ -739,10 +749,62 @@ func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	}
 }
 
+// A project policy's key/value entry is filled from the host environment named
+// by value, and its secret travels on stdin like the built-in keys.
+func TestProjectPolicyAuthSecretTravelsOnStdin(t *testing.T) {
+	t.Setenv("EXAMPLE_TOKEN", "example-SECRET")
+	const policy = `policy: v1
+mode: allowlist
+hosts:
+  "api.example.com:443":
+    key: Authorization
+    value: EXAMPLE_TOKEN
+    format: Bearer {value}
+`
+	s := newSandbox(Options{Sandbox: true, Policy: []byte(policy)}, "")
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.credentials(raw)
+	if err != nil || !strings.Contains(string(b), "example-SECRET") {
+		t.Fatalf("credentials = %q, %v; want the secret on stdin", b, err)
+	}
+	pn := &proxyNet{network: "rnes-net-1", container: "rnes-proxy-1"}
+	joined := strings.Join(s.runArgs("rnes-1-aa", "/work/proj", pn, false), " ")
+	if strings.Contains(joined, "example-SECRET") {
+		t.Errorf("the secret is in a docker argv: %s", joined)
+	}
+}
+
+// An explicit exact entry in a project policy keeps its own auth settings; a
+// session key only supplies the built-in entry when the project has none.
+func TestSandboxPolicyKeepsAnExactCloudAuthOverride(t *testing.T) {
+	const policy = `policy: v1
+mode: allowlist
+hosts:
+  "openrouter.ai:443":
+    key: X-Api-Key
+    value: PROJECT_OPENROUTER_KEY
+`
+	s := newSandbox(Options{Sandbox: true, Policy: []byte(policy), Secrets: map[string]string{EnvOpenRouterAPIKey: "sk-or-SECRET"}}, "")
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, ok := pol.AuthFor("openrouter.ai:443"); !ok || a.Key != "X-Api-Key" || a.Value != "PROJECT_OPENROUTER_KEY" {
+		t.Errorf("auth = (%+v, %v), want the project's explicit entry", a, ok)
+	}
+}
+
 func TestSandboxRunSendsTheOpenRouterKeyOnStdinNotArgv(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	s := newSandbox(Options{Sandbox: true, OpenRouterKey: "sk-or-SECRET"}, filepath.Join(t.TempDir(), "absent.jsonc"))
+	s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvOpenRouterAPIKey: "sk-or-SECRET"}}, filepath.Join(t.TempDir(), "absent.jsonc"))
 	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m"}); err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +829,7 @@ func TestConfigureDropsEveryLiteralProviderAPIKey(t *testing.T) {
 	}
 	// Every key is dropped whether or not a session key exists.
 	for _, key := range []string{"mis-SECRET", ""} {
-		s := newSandbox(Options{Sandbox: true, MistralKey: key}, host)
+		s := newSandbox(Options{Sandbox: true, Secrets: map[string]string{EnvMistralAPIKey: key}}, host)
 		if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m"}); err != nil {
 			t.Fatal(err)
 		}
@@ -801,7 +863,7 @@ func TestConfigureWarningSeparatesProxiedFromLostProviders(t *testing.T) {
 	}{
 		{
 			name: "openrouter key set",
-			opts: Options{Sandbox: true, OpenRouterKey: "or-SECRET"},
+			opts: Options{Sandbox: true, Secrets: map[string]string{EnvOpenRouterAPIKey: "or-SECRET"}},
 			want: "the proxy injects its key for openrouter (from RNES_OPENROUTER_API_KEY); " +
 				"mistral, vllm models don't work in the sandbox without a key of their own",
 		},

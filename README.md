@@ -198,6 +198,11 @@ rnes -no-web    # don't expose the web UI (sandbox: no loopback forward)
 | `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; ignored with `-harness agy`; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
 | `RNES_MISTRAL_API_KEY`    | Mistral API key the sandbox's proxy injects at `api.mistral.ai` (requires `-sandbox`; ignored with `-harness agy`; see *Mistral models* below). To reuse the key opencode stores, set with `export RNES_MISTRAL_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.mistral.key')`; a Vibe subscription key also works (on macOS, `export RNES_MISTRAL_API_KEY=$(security find-generic-password -s ai.mistral.vibe -a MISTRAL_API_KEY -w)` after browser sign-in; on Linux, copy the key from `https://chat.mistral.ai/code/extensions` (Advanced section)). |
 
+Those three variables are just the built-in cases: any `-sandbox` session can
+inject another host environment variable through `.rnes/policy.yaml` with
+`key`, `value` and an optional `format` (see *Sandbox* above and
+[`docs/policy.example.yaml`](docs/policy.example.yaml)).
+
 ### Sharing a llama-server across sessions
 
 If a healthy llama-server is already listening on the target port, `rnes`
@@ -323,13 +328,14 @@ ownership".
       "grpc.example.com:443":
         no-inspect: true
 
-      # Generic authentication provider metadata: the HTTP header to fill in,
-      # and the environment variable that will supply its value. Both must be
-      # set together and the entry must stay inspected. The schema reserves
-      # this for the auth-provider phase; injection is not active yet.
+      # Generic authentication: the HTTP header the proxy fills in, the
+      # environment variable that supplies the secret, and optionally how the
+      # secret is written ({value} stands for it). key/value must be set
+      # together and the entry must stay inspected.
       "api.example.com:443":
         key: Authorization
         value: EXAMPLE_TOKEN
+        format: Bearer {value}
     ```
 
     `hosts` is an allow-list: every key is a `host:port` (quote it when in
@@ -343,9 +349,15 @@ ownership".
     outside the list. `no-inspect: true` tunnels that endpoint's TLS untouched
     instead of decrypting it (needed for HTTP/2, gRPC, WebSockets or
     certificate-pinned endpoints). The two marks can be combined. `key`/`value`
-    are the foundation for generic authentication providers: `key` is the HTTP
-    header to set and `value` names the host environment variable holding the
-    secret; the file never contains the secret itself. Every `-sandbox` run
+    enable generic credential injection: `key` is the HTTP header the proxy
+    fills in, `value` names the host environment variable holding the secret,
+    and the optional `format` says how it is written (`Bearer {value}`, for
+    example; `{value}` is replaced by the secret). Without `format` the header
+    value is the secret alone. The file never contains the secret itself; the
+    proxy overwrites that header only when forwarding to the listed host.
+    Treat `.rnes/policy.yaml` as trusted input: a project-provided file can name
+    any environment variable, so review it before running in a repository you
+    don't trust. Every `-sandbox` run
     shadows `<cwd>/.rnes` with a read-only tmpfs at `/workspace/.rnes`
     (rejecting symlinks) and, when the file exists, mounts
     `<cwd>/.rnes/policy.yaml` read-only inside it, so an agent inside the
@@ -416,7 +428,10 @@ ownership".
 - **GitHub credentials:** with `RNES_GITHUB_TOKEN` set, the proxy injects the
   token into requests to `github.com` (git over https) and `api.github.com`
   (`gh`), so the agent can clone private repos, push and open PRs without the
-  token ever being inside the sandbox.
+  token ever being inside the sandbox. GitHub stays a dedicated placeholder
+  provider because `git` sends its credential as an HTTP Basic password, which
+  a header template can't express; the plain-Bearer cloud providers are policy
+  key/value entries instead.
   - *What the sandbox gets:* `GH_TOKEN` set to a random per-session placeholder
     and a git credential helper that answers with it. The proxy replaces the
     placeholder in the `Authorization` header (Bearer, token or Basic) and only
@@ -440,14 +455,15 @@ ownership".
   OpenRouter models alongside the local llama-server, without the key ever being
   inside it. Local llama stays the default (`-model` is unchanged); switch to
   an OpenRouter model inside opencode, which ships `openrouter` as a built-in
-  provider. Unset, nothing changes: no extra provider, no extra policy entry.
-  - *Mechanism:* the same as the GitHub token. `rnes` reads and unsets the
-    variable, sends the key to the proxy on stdin, and gives the sandbox only
-    `OPENROUTER_API_KEY=<placeholder>`. The proxy swaps the placeholder for the
-    key in the `Authorization` header, only at `openrouter.ai:443`. That host is
-    added to the proxy's policy (so it is decrypted and logged) only when the
-    key is set. Streaming completions pass through. `rnes` prints which
-    credential providers are active at startup.
+  provider.
+  - *Mechanism:* a policy key/value entry, not a special provider. The built-in
+    policy lists `openrouter.ai:443` with `key: Authorization`,
+    `value: RNES_OPENROUTER_API_KEY` and `format: Bearer {value}`. `rnes` reads
+    and unsets the variable, sends the key to the proxy on stdin, and gives the
+    sandbox only `OPENROUTER_API_KEY=<placeholder>`. The proxy sets
+    `Authorization: Bearer <key>` on requests to that host, so injection works
+    even if a client sends no header at all. Streaming completions pass through.
+    `rnes` prints which credentials are active at startup.
   - *Curating models:* add `providers.openrouter.models` to your host
     `opencode.jsonc`; the sandbox config starts from the v2 `providers` block
     (the legacy `provider` block is inert in opencode v2). Keep keys out of
@@ -469,10 +485,11 @@ ownership".
     `rnes` refuses `-no-inspect` while the variable is set.
 - **Mistral models:** with `RNES_MISTRAL_API_KEY` set, the sandbox can use
   Mistral models alongside the local llama-server, by the same mechanism as
-  OpenRouter models above: the sandbox only gets
-  `MISTRAL_API_KEY=<placeholder>`, and the proxy swaps it for the key in the
-  `Authorization` header, only at `api.mistral.ai:443`. To reuse the key
-  opencode stores (same `opencode auth login` sign-in as on the host):
+  OpenRouter models above: the built-in policy lists `api.mistral.ai:443` with
+  a `Bearer {value}` entry for `RNES_MISTRAL_API_KEY`, the sandbox only gets
+  `MISTRAL_API_KEY=<placeholder>`, and the proxy fills in the `Authorization`
+  header at that host. To reuse the key opencode stores (same
+  `opencode auth login` sign-in as on the host):
 
   ```sh
   export RNES_MISTRAL_API_KEY=$(cat ~/.local/share/opencode/auth.json | jq -c -r '.mistral.key')

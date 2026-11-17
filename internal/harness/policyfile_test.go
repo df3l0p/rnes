@@ -23,6 +23,7 @@ hosts:
     private: true
     key: Authorization
     value: EXAMPLE_TOKEN
+    format: Bearer {value}
   "grpc.example.com:443":
     no-inspect: true
 `))
@@ -35,7 +36,7 @@ hosts:
 	if !pol.Allows("example.com:8443") || !pol.AllowsPrivate("example.com:8443") {
 		t.Errorf("wildcard/private entry = %+v", pol)
 	}
-	if a, ok := pol.AuthFor("example.com:8443"); !ok || a.Key != "Authorization" || a.Value != "EXAMPLE_TOKEN" {
+	if a, ok := pol.AuthFor("example.com:8443"); !ok || a.Key != "Authorization" || a.Value != "EXAMPLE_TOKEN" || a.Format != "Bearer {value}" {
 		t.Errorf("auth = (%+v, %v)", a, ok)
 	}
 	if !pol.SkipsInspect("grpc.example.com:443") {
@@ -68,6 +69,10 @@ func TestParsePolicyYAMLRejectsInvalidDocuments(t *testing.T) {
 		{"unknown entry field", yamlHeader + "hosts: {\"example.com:443\": {privatee: true}}\n", "privatee"},
 		{"key without value", yamlHeader + "hosts: {\"example.com:443\": {key: Authorization}}\n", "key and value must be set together"},
 		{"auth with no-inspect", yamlHeader + "hosts: {\"example.com:443\": {no-inspect: true, key: Authorization, value: TOKEN}}\n", "can't be combined with no-inspect"},
+		{"format without key/value", yamlHeader + "hosts: {\"example.com:443\": {format: \"Bearer {value}\"}}\n", "format needs key and value"},
+		{"format with key only", yamlHeader + "hosts: {\"example.com:443\": {key: Authorization, format: \"Bearer {value}\"}}\n", "format needs key and value"},
+		{"format with value only", yamlHeader + "hosts: {\"example.com:443\": {value: TOKEN, format: \"Bearer {value}\"}}\n", "format needs key and value"},
+		{"format without placeholder", yamlHeader + "hosts: {\"example.com:443\": {key: Authorization, value: TOKEN, format: Bearer}}\n", `format must contain "{value}" exactly once`},
 		{"two documents", yamlHeader + "hosts: {}\n---\n" + yamlHeader + "hosts: {}\n", "exactly one YAML document"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,6 +121,7 @@ hosts:
     private: true
     key: Authorization
     value: EXAMPLE_TOKEN
+    format: Bearer {value}
   "grpc.example.com:443":
     no-inspect: true
 `))
@@ -133,7 +139,7 @@ hosts:
 	if !back.Explicit("example.com:8443") || !back.AllowsPrivate("example.com:8443") {
 		t.Errorf("wildcard/private mark lost in the JSON hand-off:\n%s", raw)
 	}
-	if a, ok := back.AuthFor("example.com:8443"); !ok || a.Key != "Authorization" || a.Value != "EXAMPLE_TOKEN" {
+	if a, ok := back.AuthFor("example.com:8443"); !ok || a.Key != "Authorization" || a.Value != "EXAMPLE_TOKEN" || a.Format != "Bearer {value}" {
 		t.Errorf("auth metadata = (%+v, %v), want it preserved", a, ok)
 	}
 	if !back.SkipsInspect("grpc.example.com:443") {
