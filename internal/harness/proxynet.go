@@ -20,7 +20,7 @@ const proxyListenAddr = "8888"
 // proxyReadyLine is what rnes-proxy prints once its port is bound.
 const proxyReadyLine = "rnes-proxy: listening on"
 
-// proxyReadyTimeout bounds how long startProxyNet waits for proxyReadyLine.
+// proxyReadyTimeout bounds how long startProxyNetWeb waits for proxyReadyLine.
 const proxyReadyTimeout = 10 * time.Second
 
 // defaultPolicy is what every sandbox may reach besides its llama-server, in
@@ -66,27 +66,23 @@ const proxyCAMount = "/ca"
 // proxy container is gone before killing it.
 const logFollowGrace = 2 * time.Second
 
-// startProxyNet creates this session's network and proxy container. hostIP
+// startProxyNetWeb creates this session's network and proxy container. hostIP
 // is the address the proxy container uses to reach the host (the same value
 // Sandbox.hostIP already computes for host.docker.internal). policy is the
 // proxy's allow-list, in the proxy's internal JSON format. With inspect the
 // proxy also terminates TLS for the policy's explicit hosts: it gets a CA
 // volume to write its trust bundle to, and its log is followed into a file.
-// providers, when non-empty, is the line of provider config rnes-proxy reads
-// from its stdin (see proxy.EncodeProviders); it requires inspect, since
-// credentials can only be injected into decrypted requests.
-func startProxyNet(image, hostIP string, policy []byte, inspect bool, providers []byte) (*proxyNet, error) {
-	return startProxyNetWeb(image, hostIP, policy, inspect, false, false, providers, "")
-}
-
-// startProxyNetWeb is startProxyNet plus an optional TCP forward for the web
-// UI: when webTarget (a host:port the proxy can dial, e.g. the sandbox's
+// With allowPrivate the proxy also dials private addresses (RFC 1918 / IPv6
+// ULA) for destinations not on the allow-list; with allowPublic it also allows
+// any public destination not on the allow-list. providers, when non-empty, is
+// the line of provider config rnes-proxy reads from its stdin (see
+// proxy.EncodeProviders); it requires inspect, since credentials can only be
+// injected into decrypted requests.
+//
+// When webTarget (a host:port the proxy can dial, e.g. the sandbox's
 // name:4096) is set, the proxy listens inside its container and rnes publishes
 // that port on host loopback. The sandbox itself stays on the internal
-// network; the forwarder only dials it. With allowPublic the proxy also allows
-// any public destination not on the allow-list; with allowPrivate it also
-// dials private addresses (RFC 1918 / IPv6 ULA) for destinations not on the
-// allow-list.
+// network; the forwarder only dials it.
 func startProxyNetWeb(image, hostIP string, policy []byte, inspect, allowPrivate, allowPublic bool, providers []byte, webTarget string) (*proxyNet, error) {
 	if len(providers) > 0 && !inspect {
 		return nil, fmt.Errorf("credential providers need TLS interception")

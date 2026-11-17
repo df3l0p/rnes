@@ -398,7 +398,9 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 		return nil, nil
 	}
 	if !c.sandbox {
-		if harness.HasProjectPolicy(cwd) {
+		if harness.HasLegacyProjectPolicy(cwd) {
+			fmt.Fprintf(stderr, "rnes: note: %s is no longer read; convert it to %s\n", harness.LegacyProjectPolicyRel, harness.ProjectPolicyRel)
+		} else if harness.HasProjectPolicy(cwd) {
 			fmt.Fprintf(stderr, "rnes: note: %s is ignored without -sandbox\n", harness.ProjectPolicyRel)
 		}
 		return nil, nil
@@ -429,6 +431,9 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 			shown[i] = hp
 		}
 		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(shown, ", "))
+	}
+	if len(pol.Auth) > 0 {
+		fmt.Fprintf(stderr, "rnes: note: auth key/value metadata in %s is reserved for a future provider; no credential injection is active yet\n", harness.ProjectPolicyRel)
 	}
 	return raw, nil
 }

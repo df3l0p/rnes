@@ -332,29 +332,32 @@ ownership".
         value: EXAMPLE_TOKEN
     ```
 
-    `hosts` is an allow-list: every key is a quoted `host:port`. The port may
-    be `*` to cover every port on that host; a wildcard host is deliberately
-    not allowed (use `-allow-public` on the command line instead). `private:
-    true` lets that one endpoint resolve to RFC 1918 / IPv6 ULA as well as a
-    public address; use `-allow-private` to reach any private address outside
-    the list. `no-inspect: true` tunnels that endpoint's TLS untouched instead
-    of decrypting it (needed for HTTP/2, gRPC, WebSockets or certificate-pinned
-    endpoints). The two marks can be combined. `key`/`value` are the
-    foundation for generic authentication providers: `key` is the HTTP header
-    to set and `value` names the host environment variable holding the secret;
-    the file never contains the secret itself. Every `-sandbox` run shadows
-    `<cwd>/.rnes` with a read-only tmpfs at `/workspace/.rnes` (rejecting
-    symlinks) and, when the file exists, mounts `<cwd>/.rnes/policy.yaml`
-    read-only inside it, so an agent inside the container can never create,
-    edit or remove `.rnes/policy.yaml`. Sandbox runs do not create `.rnes`;
-    `-generate-policy` is the way to add one. The tmpfs is deliberate: a
-    nested bind mount of the host directory made Docker Desktop for Mac leave
-    a `deny delete` ACL on it after an interrupted session, which then made
-    `rm -rf` and `git worktree remove` fail. Without `-sandbox`, an existing
-    `.rnes/policy.yaml` is ignored with a note. A legacy `.rnes/policy.txt` is
-    rejected with a conversion error rather than silently ignored: move each
-    line under `hosts:` as `"host:port": {}` (and turn old `private` /
-    `no-inspect` prefixes into the fields above).
+    `hosts` is an allow-list: every key is a `host:port` (quote it when in
+    doubt). The port may be `*` to cover every port on that host; a wildcard
+    host is deliberately not allowed (use `-allow-public` on the command line
+    instead). An exact `host:port` entry takes precedence over a matching
+    `"host:*"` entry, including the entries rnes adds for the session's model
+    server and configured providers; those exact entries keep their own marks.
+    `private: true` lets that one endpoint resolve to RFC 1918 / IPv6 ULA as
+    well as a public address; use `-allow-private` to reach any private address
+    outside the list. `no-inspect: true` tunnels that endpoint's TLS untouched
+    instead of decrypting it (needed for HTTP/2, gRPC, WebSockets or
+    certificate-pinned endpoints). The two marks can be combined. `key`/`value`
+    are the foundation for generic authentication providers: `key` is the HTTP
+    header to set and `value` names the host environment variable holding the
+    secret; the file never contains the secret itself. Every `-sandbox` run
+    shadows `<cwd>/.rnes` with a read-only tmpfs at `/workspace/.rnes`
+    (rejecting symlinks) and, when the file exists, mounts
+    `<cwd>/.rnes/policy.yaml` read-only inside it, so an agent inside the
+    container can never create, edit or remove `.rnes/policy.yaml`. Sandbox
+    runs do not create `.rnes`; `-generate-policy` is the way to add one. The
+    tmpfs is deliberate: a nested bind mount of the host directory made Docker
+    Desktop for Mac leave a `deny delete` ACL on it after an interrupted
+    session, which then made `rm -rf` and `git worktree remove` fail. Without
+    `-sandbox`, an existing `.rnes/policy.yaml` is ignored with a note. A
+    legacy `.rnes/policy.txt` is rejected with a conversion error rather than
+    silently ignored: move each line under `hosts:` as `"host:port": {}` (and
+    turn old `private` / `no-inspect` prefixes into the fields above).
   - `-allow-public` opens the sandbox up to any public host over http(s)
     instead of just the allow-list. Every destination other than llama-server —
     whether listed in `policy.yaml` or opened by `-allow-public` — must still

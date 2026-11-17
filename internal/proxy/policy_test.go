@@ -277,7 +277,6 @@ func TestMarshalPolicyRoundTrip(t *testing.T) {
 	pol.MarkNoInspect("grpc.example.com:443")
 	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN"})
 	pol.SetAuth("api.example.com:*", AuthConfig{Key: "X-Api-Key", Value: "WILD_TOKEN"})
-	pol.AnyPublic = true // transport-only; must not be written to the file
 
 	raw, err := MarshalPolicy(pol)
 	if err != nil {
@@ -304,7 +303,16 @@ func TestMarshalPolicyRoundTrip(t *testing.T) {
 	if a, ok := back.AuthFor("api.example.com:8443"); !ok || a != (AuthConfig{Key: "X-Api-Key", Value: "WILD_TOKEN"}) {
 		t.Errorf("round trip lost wildcard auth metadata: %+v, %v", a, ok)
 	}
-	if back.AnyPublic {
-		t.Error("AnyPublic must not be rendered into the policy file")
+
+	// Transport modes can't be represented in the file, so serializing one
+	// must fail rather than silently drop it.
+	pol.AnyPublic = true
+	if _, err := MarshalPolicy(pol); err == nil || !strings.Contains(err.Error(), "transport modes") {
+		t.Errorf("MarshalPolicy(AnyPublic) = %v, want a transport-mode error", err)
+	}
+	pol.AnyPublic = false
+	pol.AnyPrivate = true
+	if _, err := MarshalPolicy(pol); err == nil || !strings.Contains(err.Error(), "transport modes") {
+		t.Errorf("MarshalPolicy(AnyPrivate) = %v, want a transport-mode error", err)
 	}
 }

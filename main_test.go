@@ -474,6 +474,34 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	if !strings.Contains(buf.String(), "host.docker.internal:5432 (private)") || !strings.Contains(buf.String(), "pypi.org:443") {
 		t.Errorf("startup line = %q, want host.docker.internal:5432 (private) and plain pypi.org:443", buf.String())
 	}
+
+	// Auth metadata is schema-only for now, so startup says it is inert.
+	buf.Reset()
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"api.example.com:443\": {key: Authorization, value: EXAMPLE_TOKEN}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "no credential injection is active yet") {
+		t.Errorf("startup output = %q, want a note that auth metadata is inert", buf.String())
+	}
+
+	// Host mode notes a legacy policy.txt instead of silently ignoring it.
+	legacyCwd := t.TempDir()
+	if err := os.Mkdir(filepath.Join(legacyCwd, ".rnes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCwd, ".rnes", "policy.txt"), []byte("pypi.org:443\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if _, err := resolvePolicy(cliConfig{}, legacyCwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), ".rnes/policy.txt is no longer read") || !strings.Contains(buf.String(), ".rnes/policy.yaml") {
+		t.Errorf("host mode legacy output = %q, want a conversion note", buf.String())
+	}
 }
 
 func TestCheckTrailingArgsRejectsPositionalsOutsideThePassthrough(t *testing.T) {

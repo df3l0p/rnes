@@ -24,9 +24,9 @@ func fakeDockerProxy(t *testing.T, exitFor map[string]int, stdoutFor map[string]
 func TestStartProxyNetCreatesNetworkThenContainerThenConnectsBridge(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", []byte(`{"policy":"v1","mode":"allowlist","hosts":{"host.docker.internal:8080":{}}}`), false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", []byte(`{"policy":"v1","mode":"allowlist","hosts":{"host.docker.internal:8080":{}}}`), false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 
@@ -94,9 +94,9 @@ func TestStartProxyNetCreatesNetworkThenContainerThenConnectsBridge(t *testing.T
 func TestStartProxyNetWritesThePolicyFile(t *testing.T) {
 	fakeDockerProxy(t, nil, nil)
 	policy := []byte(`{"policy":"v1","mode":"allowlist","hosts":{"host.docker.internal:8080":{}}}`)
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", policy, false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", policy, false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 	if p.policyFile == "" {
@@ -113,9 +113,9 @@ func TestStartProxyNetWritesThePolicyFile(t *testing.T) {
 
 func TestProxyNetStopTearsDownContainerThenNetwork(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	p.stop()
 
@@ -139,7 +139,7 @@ func TestProxyNetStopTearsDownContainerThenNetwork(t *testing.T) {
 
 func TestStartProxyNetCleansUpTheNetworkWhenTheContainerFailsToStart(t *testing.T) {
 	logPath := fakeDocker(t, map[string]int{"run -d": 1})
-	if _, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil); err == nil {
+	if _, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, ""); err == nil {
 		t.Fatal("expected an error when the proxy container fails to start")
 	}
 	var created, removed string
@@ -166,7 +166,7 @@ func TestStartProxyNetSurfacesDockerStderr(t *testing.T) {
 		map[string]int{"network create": 1},
 		map[string]string{"network create": "Error response from daemon: pool overlaps with other one on this address space"},
 	)
-	_, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	_, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err == nil {
 		t.Fatal("expected an error when network create fails")
 	}
@@ -249,13 +249,62 @@ func TestSandboxPolicyIsDefaultsPlusModelServer(t *testing.T) {
 	}
 }
 
-// If rnes-proxy exits at startup, startProxyNet must fail with its output (the
+// rnes adds exact entries for the model server and configured providers after
+// merging the user policy. Exact entries win over "host:*", so those endpoints
+// keep only the marks rnes gives them, even when the user policy wildcarded
+// the host.
+func TestSandboxPolicyExactAddedEntriesWinOverUserWildcards(t *testing.T) {
+	const userPolicy = `policy: v1
+mode: allowlist
+hosts:
+  "host.docker.internal:*":
+    private: true
+    no-inspect: true
+  "openrouter.ai:*":
+    private: true
+    no-inspect: true
+`
+	s := newSandbox(Options{Sandbox: true, Policy: []byte(userPolicy)}, "")
+	s.modelServer = "host.docker.internal:8080"
+	s.openrouterKey = "sk-or-test"
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ParsePolicy(policy()): %v", err)
+	}
+
+	// The model server is added with the private mark only.
+	if !pol.AllowsPrivate("host.docker.internal:8080") {
+		t.Error("the exact model-server entry must stay private")
+	}
+	if pol.SkipsInspect("host.docker.internal:8080") {
+		t.Error("the wildcard's no-inspect must not apply to the exact model-server entry")
+	}
+
+	// OpenRouter is added public-only and inspected, so injection can happen.
+	if pol.AllowsPrivate("openrouter.ai:443") || pol.SkipsInspect("openrouter.ai:443") {
+		t.Error("the exact openrouter.ai entry must not inherit the wildcard's private/no-inspect marks")
+	}
+
+	// Other ports still get the user's wildcard marks.
+	if !pol.SkipsInspect("host.docker.internal:8443") || !pol.AllowsPrivate("host.docker.internal:8443") {
+		t.Error("other ports must keep the wildcard entry's marks")
+	}
+	if !pol.AllowsPrivate("openrouter.ai:8443") || !pol.SkipsInspect("openrouter.ai:8443") {
+		t.Error("other OpenRouter ports must keep the wildcard entry's marks")
+	}
+}
+
+// If rnes-proxy exits at startup, startProxyNetWeb must fail with its output (the
 // only clue why) and clean up, instead of starting a sandbox whose every
 // request would then fail.
 func TestStartProxyNetFailsWithTheProxyOutputWhenItExitsAtStartup(t *testing.T) {
 	const why = `rnes-proxy: parsing policy file /etc/rnes-proxy/policy.json: hosts["github.com"]: "github.com" is not host:port`
 	logPath := fakeDockerOutput(t, nil, map[string]string{"logs": why, "inspect -f": "false"})
-	_, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	_, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err == nil {
 		t.Fatal("expected an error when the proxy container exits at startup")
 	}
@@ -275,9 +324,9 @@ func TestStartProxyNetFailsWithTheProxyOutputWhenItExitsAtStartup(t *testing.T) 
 func TestStartProxyNetWaitsForTheProxyToListen(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 	connectIdx, readyIdx := -1, -1
@@ -331,9 +380,9 @@ func TestSandboxPolicyWithAllowPublicIsAProxyFlagNotAFileEntry(t *testing.T) {
 func TestStartProxyNetWithInspectCreatesTheCAVolumeAndRunsTheProxyWithIt(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 
@@ -366,9 +415,9 @@ func TestStartProxyNetWithInspectCreatesTheCAVolumeAndRunsTheProxyWithIt(t *test
 
 func TestStartProxyNetWithoutInspectHasNoVolumeAndNoIntercept(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 	if p.caVolume != "" {
@@ -384,9 +433,9 @@ func TestStartProxyNetWithoutInspectHasNoVolumeAndNoIntercept(t *testing.T) {
 func TestProxyNetStopRemovesTheCAVolumeLast(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	p.stop()
 
@@ -411,7 +460,7 @@ func TestProxyNetStopRemovesTheCAVolumeLast(t *testing.T) {
 
 func TestStartProxyNetRemovesTheCAVolumeWhenTheContainerFailsToStart(t *testing.T) {
 	logPath := fakeDocker(t, map[string]int{"run -d": 1})
-	if _, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, nil); err == nil {
+	if _, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, ""); err == nil {
 		t.Fatal("expected an error when the proxy container fails to start")
 	}
 	var created, removed string
@@ -433,9 +482,9 @@ func TestStartProxyNetWithInspectFollowsTheProxyLogIntoAFile(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 
@@ -446,7 +495,7 @@ func TestStartProxyNetWithInspectFollowsTheProxyLogIntoAFile(t *testing.T) {
 		t.Errorf("log file was not created: %v", err)
 	}
 	// The follower is a separate process, so its call is recorded a moment
-	// after startProxyNet returns.
+	// after startProxyNetWeb returns.
 	want := "logs -f " + p.container
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -477,9 +526,9 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, line)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, line, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 
@@ -515,7 +564,7 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +581,7 @@ func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
 
 func TestStartProxyNetRefusesProvidersWithoutInspect(t *testing.T) {
 	fakeDockerProxy(t, nil, nil)
-	if _, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, []byte("x\n")); err == nil {
+	if _, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, []byte("x\n"), ""); err == nil {
 		t.Fatal("want an error: credentials can't be injected without decrypting")
 	}
 }
@@ -545,7 +594,7 @@ func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 	line, _ := proxy.EncodeProviders([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
 
 	start := time.Now()
-	_, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, true, line)
+	_, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, line, "")
 	if err == nil || !strings.Contains(err.Error(), "attach") {
 		t.Fatalf("err = %v, want one naming docker attach", err)
 	}
@@ -622,9 +671,9 @@ func TestStartProxyNetWithAllowPublicPassesTheFlag(t *testing.T) {
 
 func TestStartProxyNetWithoutWebDoesNotPublish(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
-	p, err := startProxyNet("rnes-proxy:test", "172.17.0.1", nil, false, nil)
+	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, nil, "")
 	if err != nil {
-		t.Fatalf("startProxyNet: %v", err)
+		t.Fatalf("startProxyNetWeb: %v", err)
 	}
 	defer p.stop()
 	for _, c := range calls(t, logPath) {

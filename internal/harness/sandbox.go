@@ -27,7 +27,7 @@ import (
 
 const (
 	// containerHost is how the proxy container reaches the host's network
-	// namespace. Docker Desktop provides it; on Linux startProxyNet adds it
+	// namespace. Docker Desktop provides it; on Linux startProxyNetWeb adds it
 	// with --add-host. The sandbox container itself never resolves it: all
 	// its egress, including to the host's llama-server, goes through the
 	// proxy instead.
@@ -79,7 +79,7 @@ type sandboxProfile struct {
 	// mistralEnv is the container env var set to mistralPlaceholder when
 	// MistralKey is active (e.g. "MISTRAL_API_KEY" for opencode).
 	mistralEnv string
-	// extraPolicy is appended to the session's proxy policy (e.g. agy's
+	// extraPolicy is merged into the session's proxy policy (e.g. agy's
 	// no-inspect Google endpoints).
 	extraPolicy string
 	// authVolume returns the per-project Docker named volume for dir, or ""
@@ -138,7 +138,7 @@ type Sandbox struct {
 	// it (host.docker.internal:<port>), set by Configure. It's added to the
 	// proxy's allow-list; it is not the proxy's own address.
 	modelServer string
-	// allowPublic adds * to the proxy policy (see Options.AllowPublic).
+	// allowPublic passes -allow-public to the proxy (see Options.AllowPublic).
 	allowPublic bool
 	// allowPrivate starts the proxy with -allow-private (see
 	// Options.AllowPrivate).
@@ -242,7 +242,7 @@ func checkExtraPolicy(policy []byte, profile sandboxProfile) error {
 		return nil
 	}
 	sort.Strings(conflicts)
-	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; add 'no-inspect: true' in %s or remove it there",
+	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; mark it no-inspect (or add an exact host:port entry with 'no-inspect: true') in %s, or remove it there",
 		profile.harness, strings.Join(conflicts, ", "), ProjectPolicyRel, ProjectPolicyRel)
 }
 

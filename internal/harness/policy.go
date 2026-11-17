@@ -24,10 +24,10 @@ const (
 	ProjectStateDir = ".rnes"
 	// ProjectPolicyRel is the display path of a project's egress policy file.
 	ProjectPolicyRel = ".rnes/policy.yaml"
-	// legacyProjectPolicyRel is the pre-YAML text format. It is rejected with
+	// LegacyProjectPolicyRel is the pre-YAML text format. It is rejected with
 	// a conversion hint rather than silently ignored: a user who keeps an old
 	// restrictive policy must not fall back to unrestricted defaults.
-	legacyProjectPolicyRel = ".rnes/policy.txt"
+	LegacyProjectPolicyRel = ".rnes/policy.txt"
 )
 
 // EnsureProjectDir ensures <cwd>/.rnes exists as a real directory (never a
@@ -84,12 +84,24 @@ func GeneratePolicy(cwd string) (string, error) {
 // HasProjectPolicy reports whether <cwd>/.rnes/policy.yaml exists on disk
 // without creating .rnes or following symlinks on the file itself.
 func HasProjectPolicy(cwd string) bool {
+	return hasProjectFile(cwd, "policy.yaml")
+}
+
+// HasLegacyProjectPolicy reports whether <cwd>/.rnes/policy.txt exists, so a
+// host run can say it is no longer read instead of silently ignoring it.
+func HasLegacyProjectPolicy(cwd string) bool {
+	return hasProjectFile(cwd, "policy.txt")
+}
+
+// hasProjectFile reports whether <cwd>/.rnes/<name> exists, without creating
+// .rnes or following symlinks on the file itself.
+func hasProjectFile(cwd, name string) bool {
 	dir := filepath.Join(cwd, ProjectStateDir)
 	fi, err := os.Lstat(dir)
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return false
 	}
-	_, err = os.Lstat(filepath.Join(dir, "policy.yaml"))
+	_, err = os.Lstat(filepath.Join(dir, name))
 	return err == nil
 }
 
@@ -99,9 +111,9 @@ func HasProjectPolicy(cwd string) bool {
 func rejectLegacyPolicy(dir string) error {
 	legacy := filepath.Join(dir, "policy.txt")
 	if _, err := os.Lstat(legacy); err == nil {
-		return fmt.Errorf("%s is no longer read; convert it to %s (policy: v1, mode: allowlist, hosts: { ... }) and remove the old file", legacyProjectPolicyRel, ProjectPolicyRel)
+		return fmt.Errorf("%s is no longer read; convert it to %s (policy: v1, mode: allowlist, hosts: { ... }) and remove the old file", LegacyProjectPolicyRel, ProjectPolicyRel)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("checking %s: %w", legacyProjectPolicyRel, err)
+		return fmt.Errorf("checking %s: %w", LegacyProjectPolicyRel, err)
 	}
 	return nil
 }

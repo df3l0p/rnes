@@ -93,7 +93,7 @@ func TestAnyPublicKeepsPrivateEntries(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("private entry under *: status = %d, want 200", resp.StatusCode)
+		t.Errorf("private entry under -allow-public: status = %d, want 200", resp.StatusCode)
 	}
 }
 

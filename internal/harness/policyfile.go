@@ -39,14 +39,18 @@ func parsePolicyYAML(r io.Reader) (proxy.Policy, error) {
 		}
 		return proxy.Policy{}, err
 	}
-	// One document only: a second '---' block is almost certainly a mistake,
-	// and silently ignoring it could leave a host the user thinks is listed.
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err != nil {
+	// One non-empty document only: a second one is almost certainly a
+	// mistake, and silently ignoring it could leave a host the user thinks is
+	// listed. Empty documents are allowed, so a trailing "---" is harmless.
+	for {
+		var extra any
+		if err := dec.Decode(&extra); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
 			return proxy.Policy{}, err
+		} else if extra != nil {
+			return proxy.Policy{}, errors.New("policy file must contain exactly one YAML document")
 		}
-		return proxy.Policy{}, errors.New("policy file must contain exactly one YAML document")
 	}
 
 	return proxy.BuildPolicy(doc.Policy, doc.Mode, doc.Hosts)

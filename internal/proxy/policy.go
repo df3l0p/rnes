@@ -241,8 +241,12 @@ func (p Policy) Entries() map[string]Entry {
 // MarshalPolicy renders p's explicit entries in the internal JSON form, for
 // rnes-proxy's policy file. The AnyPublic and AnyPrivate transport modes are
 // intentionally not rendered: rnes-proxy receives those as command-line flags,
-// so a project policy can never grant unrestricted egress by itself.
+// so a project policy can never grant unrestricted egress by itself. Passing a
+// policy with either mode set is an error rather than silently dropping it.
 func MarshalPolicy(p Policy) ([]byte, error) {
+	if p.AnyPublic || p.AnyPrivate {
+		return nil, errors.New("transport modes (AnyPublic/AnyPrivate) must be passed as rnes-proxy flags, not serialized")
+	}
 	raw, err := json.MarshalIndent(policyDocument{
 		Policy: PolicyVersion,
 		Mode:   PolicyModeAllowlist,

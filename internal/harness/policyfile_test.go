@@ -43,6 +43,17 @@ hosts:
 	}
 }
 
+func TestParsePolicyYAMLAllowsTrailingEmptyDocuments(t *testing.T) {
+	for _, doc := range []string{
+		yamlHeader + "hosts: {}\n---\n",
+		yamlHeader + "hosts: {}\n---\n---\n",
+	} {
+		if _, err := parsePolicyYAML(strings.NewReader(doc)); err != nil {
+			t.Errorf("parsePolicyYAML(%q) = %v, want a trailing empty document to be accepted", doc, err)
+		}
+	}
+}
+
 func TestParsePolicyYAMLRejectsInvalidDocuments(t *testing.T) {
 	for _, tc := range []struct {
 		name string
