@@ -16,14 +16,18 @@ import (
 const (
 	// ProjectStateDir is the per-project folder inside the working directory.
 	// Sandbox sessions shadow it with a read-only tmpfs at /workspace/.rnes
-	// (and mount policy.txt inside it read-only when present) so an agent
+	// (and mount policy.yaml inside it read-only when present) so an agent
 	// inside the container can never create, edit, or remove
-	// .rnes/policy.txt. A tmpfs rather than a nested bind mount keeps Docker
+	// .rnes/policy.yaml. A tmpfs rather than a nested bind mount keeps Docker
 	// Desktop for Mac from putting a "deny delete" ACL on the host directory,
 	// which used to make `git worktree remove` fail after a session.
 	ProjectStateDir = ".rnes"
 	// ProjectPolicyRel is the display path of a project's egress policy file.
-	ProjectPolicyRel = ".rnes/policy.txt"
+	ProjectPolicyRel = ".rnes/policy.yaml"
+	// LegacyProjectPolicyRel is the pre-YAML text format. It is rejected with
+	// a conversion hint rather than silently ignored: a user who keeps an old
+	// restrictive policy must not fall back to unrestricted defaults.
+	LegacyProjectPolicyRel = ".rnes/policy.txt"
 )
 
 // EnsureProjectDir ensures <cwd>/.rnes exists as a real directory (never a
@@ -49,14 +53,17 @@ func EnsureProjectDir(cwd string) (string, error) {
 	return dir, nil
 }
 
-// GeneratePolicy creates <cwd>/.rnes/policy.txt with the default allow-list
+// GeneratePolicy creates <cwd>/.rnes/policy.yaml with the default allow-list
 // template. It refuses to follow symlinks or overwrite an existing policy file.
 func GeneratePolicy(cwd string) (string, error) {
 	dir, err := EnsureProjectDir(cwd)
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "policy.txt")
+	if err := rejectLegacyPolicy(dir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "policy.yaml")
 	if _, err := os.Lstat(path); err == nil {
 		return "", fmt.Errorf("%s already exists; edit it directly or remove it first", ProjectPolicyRel)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -74,22 +81,48 @@ func GeneratePolicy(cwd string) (string, error) {
 	return path, nil
 }
 
-// HasProjectPolicy reports whether <cwd>/.rnes/policy.txt exists on disk
+// HasProjectPolicy reports whether <cwd>/.rnes/policy.yaml exists on disk
 // without creating .rnes or following symlinks on the file itself.
 func HasProjectPolicy(cwd string) bool {
+	return hasProjectFile(cwd, "policy.yaml")
+}
+
+// HasLegacyProjectPolicy reports whether <cwd>/.rnes/policy.txt exists, so a
+// host run can say it is no longer read instead of silently ignoring it.
+func HasLegacyProjectPolicy(cwd string) bool {
+	return hasProjectFile(cwd, "policy.txt")
+}
+
+// hasProjectFile reports whether <cwd>/.rnes/<name> exists, without creating
+// .rnes or following symlinks on the file itself.
+func hasProjectFile(cwd, name string) bool {
 	dir := filepath.Join(cwd, ProjectStateDir)
 	fi, err := os.Lstat(dir)
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return false
 	}
-	_, err = os.Lstat(filepath.Join(dir, "policy.txt"))
+	_, err = os.Lstat(filepath.Join(dir, name))
 	return err == nil
 }
 
-// projectPolicyPath returns the host path of <cwd>/.rnes/policy.txt when it
+// rejectLegacyPolicy returns a conversion error when the pre-YAML
+// .rnes/policy.txt is present. If both files exist the legacy one still has to
+// go, so the active policy can never be ambiguous.
+func rejectLegacyPolicy(dir string) error {
+	legacy := filepath.Join(dir, "policy.txt")
+	if _, err := os.Lstat(legacy); err == nil {
+		return fmt.Errorf("%s is no longer read; convert it to %s (policy: v1, mode: allowlist, hosts: { ... }) and remove the old file", LegacyProjectPolicyRel, ProjectPolicyRel)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking %s: %w", LegacyProjectPolicyRel, err)
+	}
+	return nil
+}
+
+// projectPolicyPath returns the host path of <cwd>/.rnes/policy.yaml when it
 // exists. It applies the same symlink and regular-file checks as
 // LoadProjectPolicy and never creates .rnes. found is false when either .rnes
-// or policy.txt is absent.
+// or policy.yaml is absent. A leftover policy.txt is an error (see
+// rejectLegacyPolicy).
 func projectPolicyPath(cwd string) (path string, found bool, err error) {
 	dir := filepath.Join(cwd, ProjectStateDir)
 	fi, err := os.Lstat(dir)
@@ -105,8 +138,11 @@ func projectPolicyPath(cwd string) (path string, found bool, err error) {
 	if !fi.IsDir() {
 		return "", false, fmt.Errorf("%s exists and is not a directory", ProjectStateDir)
 	}
+	if err := rejectLegacyPolicy(dir); err != nil {
+		return "", false, err
+	}
 
-	path = filepath.Join(dir, "policy.txt")
+	path = filepath.Join(dir, "policy.yaml")
 	pfi, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -120,8 +156,8 @@ func projectPolicyPath(cwd string) (path string, found bool, err error) {
 	return path, true, nil
 }
 
-// LoadProjectPolicy reads and validates <cwd>/.rnes/policy.txt when present.
-// When absent, found is false and raw is nil. Both .rnes and .rnes/policy.txt
+// LoadProjectPolicy reads and validates <cwd>/.rnes/policy.yaml when present.
+// When absent, found is false and raw is nil. Both .rnes and .rnes/policy.yaml
 // are checked with Lstat so symlinks are rejected before anything starts.
 func LoadProjectPolicy(cwd string) (raw []byte, pol proxy.Policy, found bool, err error) {
 	path, found, err := projectPolicyPath(cwd)
@@ -136,7 +172,7 @@ func LoadProjectPolicy(cwd string) (raw []byte, pol proxy.Policy, found bool, er
 	if raw == nil {
 		raw = []byte{}
 	}
-	pol, err = proxy.ParseUserPolicy(bytes.NewReader(raw))
+	pol, err = parsePolicyYAML(bytes.NewReader(raw))
 	if err != nil {
 		return nil, proxy.Policy{}, false, fmt.Errorf("parsing %s: %w", ProjectPolicyRel, err)
 	}

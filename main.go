@@ -54,7 +54,7 @@ type cliConfig struct {
 	// sandboxUpdate rebuilds the sandbox images and exits without running the
 	// agent. applyImplications turns it into sandbox and build.
 	sandboxUpdate bool
-	// generatePolicy writes a starter .rnes/policy.txt in the current
+	// generatePolicy writes a starter .rnes/policy.yaml in the current
 	// directory and exits without running the agent.
 	generatePolicy bool
 	// allowPublic lets the sandbox reach any public host, not just the
@@ -170,7 +170,7 @@ func checkTrailingArgs(argv, args []string) error {
 // checked and a cloud harness's unused OpenRouter and Mistral keys are
 // dropped first (so nothing downstream sees credentials or flags that only a
 // model-server session would use), then skills and the sandbox policy (so a
-// bad -skill or .rnes/policy.txt fails with nothing left behind), then the
+// bad -skill or .rnes/policy.yaml fails with nothing left behind), then the
 // harness itself. Without -sandbox the harness reports its own error (e.g.
 // agy requires it). The returned cfg carries any adjustments (the dropped
 // cloud keys).
@@ -391,14 +391,16 @@ func resolveSkills(c cliConfig, home, cwd string, stderr io.Writer) ([]skills.Sk
 	return attached, nil
 }
 
-// resolvePolicy loads <cwd>/.rnes/policy.txt for a sandbox session, or notes
+// resolvePolicy loads <cwd>/.rnes/policy.yaml for a sandbox session, or notes
 // that the file is ignored when running on the host. It never creates .rnes.
 func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 	if c.sandboxUpdate {
 		return nil, nil
 	}
 	if !c.sandbox {
-		if harness.HasProjectPolicy(cwd) {
+		if harness.HasLegacyProjectPolicy(cwd) {
+			fmt.Fprintf(stderr, "rnes: note: %s is no longer read; convert it to %s\n", harness.LegacyProjectPolicyRel, harness.ProjectPolicyRel)
+		} else if harness.HasProjectPolicy(cwd) {
 			fmt.Fprintf(stderr, "rnes: note: %s is ignored without -sandbox\n", harness.ProjectPolicyRel)
 		}
 		return nil, nil
@@ -429,6 +431,9 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 			shown[i] = hp
 		}
 		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(shown, ", "))
+	}
+	if len(pol.Auth) > 0 {
+		fmt.Fprintf(stderr, "rnes: note: auth key/value metadata in %s is reserved for a future provider; no credential injection is active yet\n", harness.ProjectPolicyRel)
 	}
 	return raw, nil
 }
@@ -514,9 +519,9 @@ func parseFlags() (cliConfig, error) {
 	flag.StringVar(&cfg.image, "image", "", "bundled sandbox image to use (default "+images.Default+"; available: "+strings.Join(images.Names(), ", ")+"); requires -sandbox")
 	flag.BoolVar(&cfg.build, "build", false, "rebuild the sandbox image from scratch, without docker's layer cache, even if it exists (it is built when missing, never pulled); requires -sandbox")
 	flag.BoolVar(&cfg.sandboxUpdate, "sandbox-update", false, "rebuild the sandbox images (every bundled one for every harness, unless -harness selects one or -image selects an image; plus each base and the proxy image) from scratch, without docker's layer cache, so it picks up new packages and a newer agent, then exit without running the agent; implies -sandbox")
-	flag.BoolVar(&cfg.generatePolicy, "generate-policy", false, "write a starter .rnes/policy.txt in the current directory for -sandbox and exit without running the agent")
+	flag.BoolVar(&cfg.generatePolicy, "generate-policy", false, "write a starter .rnes/policy.yaml in the current directory for -sandbox and exit without running the agent")
 	flag.BoolVar(&cfg.allowPublic, "allow-public", false, "let the sandbox reach any public host over http(s), not just the allow-list (private addresses stay blocked apart from llama-server); requires -sandbox")
-	flag.BoolVar(&cfg.allowPrivate, "allow-private", false, "let the sandbox reach private addresses (RFC 1918 or IPv6 ULA) outside the allow-list; mark one entry 'private host:port' in .rnes/policy.txt to allow just that one; pair with -allow-public to allow both address types everywhere; loopback, link-local metadata and CGNAT stay blocked; requires -sandbox")
+	flag.BoolVar(&cfg.allowPrivate, "allow-private", false, "let the sandbox reach private addresses (RFC 1918 or IPv6 ULA) outside the allow-list; mark one entry 'private: true' in .rnes/policy.yaml to allow just that one; pair with -allow-public to allow both address types everywhere; loopback, link-local metadata and CGNAT stay blocked; requires -sandbox")
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
 	flag.BoolVar(&cfg.web, "web", false, "open opencode's web UI for the session in your browser at startup (requires -harness opencode); the TUI keeps running and both share one live session")
 	flag.BoolVar(&cfg.noWeb, "no-web", false, "don't serve the session's web UI at all (with -sandbox it is exposed on a loopback port by default; on the host opencode's server always serves it, so this only saves the sandbox forward)")

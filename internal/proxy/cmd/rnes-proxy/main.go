@@ -20,8 +20,9 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8888", "address to listen on")
-	policyPath := flag.String("policy", "/etc/rnes-proxy/policy.txt", "path to the allow-list policy file (one host:port per line)")
+	policyPath := flag.String("policy", "/etc/rnes-proxy/policy.json", "path to the allow-list policy file (internal JSON: policy, mode and hosts)")
 	intercept := flag.Bool("intercept", false, "terminate TLS for the hosts the policy lists explicitly, with a CA created for this run, and log each request")
+	allowPublic := flag.Bool("allow-public", false, "also allow destinations not in the policy, as long as they resolve to a public address; listed hosts stay public-only and inspected")
 	allowPrivate := flag.Bool("allow-private", false, "also allow destinations not in the policy to resolve to a private address (RFC 1918 or IPv6 ULA); listed hosts stay public-only unless marked private")
 	caOut := flag.String("ca-out", "/ca/ca.pem", "with -intercept: where to write the trust bundle (the system roots plus the session CA's certificate; the CA's key is never written)")
 	systemRoots := flag.String("system-roots", "/etc/ssl/certs/ca-certificates.crt", "with -intercept: the system trust roots to include in the bundle")
@@ -36,6 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("rnes-proxy: %v", err)
 	}
+	pol.AnyPublic = *allowPublic
 	pol.AnyPrivate = *allowPrivate
 	srv := &proxy.Server{Policy: pol}
 	if *intercept {
@@ -49,7 +51,7 @@ func main() {
 			log.Fatalf("rnes-proxy: writing the trust bundle: %v", err)
 		}
 		if ca == nil {
-			// Every allowed host skips inspection (e.g. an empty .rnes/policy.txt
+			// Every allowed host skips inspection (e.g. an empty .rnes/policy.yaml
 			// with a cloud harness): the bundle is the system roots alone, so the
 			// sandbox's SSL_CERT_FILE still validates real upstream certificates.
 			fmt.Printf("rnes-proxy: no hosts to intercept; system roots written to %s\n", *caOut)

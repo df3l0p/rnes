@@ -93,11 +93,11 @@ func TestAnyPublicKeepsPrivateEntries(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("private entry under *: status = %d, want 200", resp.StatusCode)
+		t.Errorf("private entry under -allow-public: status = %d, want 200", resp.StatusCode)
 	}
 }
 
-// Ordinary explicit entries (everything in a user's policy.txt) must also
+// Ordinary explicit entries (everything in a user's policy.yaml) must also
 // resolve to public addresses, so a listed domain that resolves or rebinds to
 // loopback, LAN, or 169.254.169.254 is still refused with 403.
 func TestExplicitPolicyEntryRefusesNonPublicAddresses(t *testing.T) {

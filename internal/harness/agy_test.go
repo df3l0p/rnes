@@ -28,13 +28,13 @@ func TestNewAgyRejectsAPolicyThatInspectsItsNoInspectEndpoints(t *testing.T) {
 	// agy needs its Google endpoints tunnelled unread; a project policy that
 	// lists one of them for TLS inspection can't be honored, so constructing
 	// the harness must fail rather than silently downgrade the user's entry.
-	_, err := New("agy", Options{Sandbox: true, Policy: []byte("github.com:443\nwww.googleapis.com:443\n")})
+	_, err := New("agy", Options{Sandbox: true, Policy: []byte("policy: v1\nmode: allowlist\nhosts: {\"github.com:443\": {}, \"www.googleapis.com:443\": {}}\n")})
 	if err == nil || !strings.Contains(err.Error(), "www.googleapis.com:443") || !strings.Contains(err.Error(), ProjectPolicyRel) {
 		t.Fatalf("New(agy, inspecting policy) = %v, want an error naming the host and %s", err, ProjectPolicyRel)
 	}
 
 	// Marking the entry no-inspect in the project policy resolves the conflict.
-	if _, err := New("agy", Options{Sandbox: true, Policy: []byte("no-inspect www.googleapis.com:443\n")}); err != nil {
+	if _, err := New("agy", Options{Sandbox: true, Policy: []byte("policy: v1\nmode: allowlist\nhosts: {\"www.googleapis.com:443\": {no-inspect: true}}\n")}); err != nil {
 		t.Fatalf("New(agy, no-inspect policy): %v", err)
 	}
 	// The built-in defaults name none of agy's endpoints, so they never conflict.
@@ -86,7 +86,11 @@ func TestAgyPolicyMarksGoogleEndpointsNoInspectWhileKeepingGitHubInspected(t *te
 		t.Fatal(err)
 	}
 	s := h.(*Sandbox)
-	pol, err := proxy.ParsePolicy(bytes.NewReader(s.policy()))
+	raw, err := s.policy()
+	if err != nil {
+		t.Fatalf("policy(agy): %v", err)
+	}
+	pol, err := proxy.ParsePolicy(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("ParsePolicy(agy): %v", err)
 	}
@@ -119,10 +123,14 @@ func TestAgyPolicyMarksGoogleEndpointsNoInspectWhileKeepingGitHubInspected(t *te
 		t.Errorf("github.com:443 should remain inspected: Explicit=%v SkipsInspect=%v", pol.Explicit("github.com:443"), pol.SkipsInspect("github.com:443"))
 	}
 
-	// With an empty .rnes/policy.txt, only agy's no-inspect endpoints are allowed,
+	// With an empty .rnes/policy.yaml, only agy's no-inspect endpoints are allowed,
 	// leaving zero intercepted DNS hosts.
 	hEmpty, _ := New("agy", Options{Sandbox: true, Policy: []byte{}})
-	emptyPol, err := proxy.ParsePolicy(bytes.NewReader(hEmpty.(*Sandbox).policy()))
+	emptyRaw, err := hEmpty.(*Sandbox).policy()
+	if err != nil {
+		t.Fatalf("policy(agy empty custom policy): %v", err)
+	}
+	emptyPol, err := proxy.ParsePolicy(bytes.NewReader(emptyRaw))
 	if err != nil {
 		t.Fatalf("ParsePolicy(agy empty custom policy): %v", err)
 	}

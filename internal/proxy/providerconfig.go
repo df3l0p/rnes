@@ -77,7 +77,8 @@ func ReadProviders(r *bufio.Reader) ([]Provider, error) {
 // explicitly in pol is noted in the log rather than failing startup, so a
 // custom per-project policy can omit a provider's hosts while the credential
 // remains set in the operator's environment: omitted hosts are blocked by pol
-// (or blind-tunnelled under *, without decrypting or injecting the secret).
+// (or blind-tunnelled under -allow-public, without decrypting or injecting the
+// secret).
 func InjectorFromStdin(r *bufio.Reader, pol Policy, logf func(string, ...any)) (*Injector, error) {
 	providers, err := ReadProviders(r)
 	if err != nil {

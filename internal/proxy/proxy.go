@@ -32,9 +32,10 @@ var forwardTransport = func() *http.Transport {
 const defaultHalfCloseIdle = 30 * time.Second
 
 // Policy decides which upstream destinations may be reached. Entries are
-// exact "host:port" strings, matching what a CONNECT target or a
-// normalized absolute-URI request host already looks like, compared
-// case-insensitively since host names are.
+// "host:port" strings, matching what a CONNECT target or a normalized
+// absolute-URI request host already looks like, compared case-insensitively
+// since host names are. The port may be "*", in which case every port on that
+// host is covered. A wildcard host is deliberately not supported.
 type Policy struct {
 	// Allow is the set of listed "host:port" entries. An entry is public-only
 	// unless it also carries the Private or AnyAddress mark; NoInspect only
@@ -42,7 +43,7 @@ type Policy struct {
 	Allow map[string]bool
 	// Private names the subset of Allow entries that may connect to a private
 	// (RFC 1918 or IPv6 ULA) address as well as a public one. This is the
-	// per-entry "private" mark in policy files, including .rnes/policy.txt.
+	// per-entry "private" mark in policy files, including .rnes/policy.yaml.
 	// Loopback, link-local metadata and CGNAT stay blocked for these entries.
 	Private map[string]bool
 	// AnyAddress names the subset of Allow entries whose address check is
@@ -53,8 +54,14 @@ type Policy struct {
 	// blind-tunnelled rather than TLS-terminated, even when a session CA is
 	// configured (for endpoints using HTTP/2, gRPC, WebSockets, or certificate
 	// pinning). They still go through the normal address check unless also in
-	// Private (or both AnyPublic and AnyPrivate are set).
+	// Private (or both AnyPublic and AnyPrivate are set). Entries with
+	// credentials (Auth) can't be no-inspect: injection needs decryption.
 	NoInspect map[string]bool
+	// Auth holds the optional credential-injection metadata for Allow entries:
+	// the HTTP header to fill in and the environment variable that supplies
+	// its value. rnes-proxy does not inject these yet; the schema is the
+	// foundation for generic authentication providers.
+	Auth map[string]AuthConfig
 	// AnyPublic also lets through any destination not in Allow, as long as
 	// the address actually dialed is public (see isPublic): the internet,
 	// but not the host machine or the LAN.
@@ -65,6 +72,34 @@ type Policy struct {
 	// Allow entries keep their public-only check unless marked Private; combine
 	// with AnyPublic to allow either address type everywhere.
 	AnyPrivate bool
+}
+
+// AuthConfig is one host's optional credential-injection metadata. Key is the
+// HTTP header to set (for example "Authorization"), and Value names the
+// environment variable holding the secret to put in it. The proxy only ever
+// reads Value's name from the policy; the secret itself stays out of the file.
+type AuthConfig struct {
+	Key   string
+	Value string
+}
+
+// entryKey returns the Allow key that covers hostport: an exact entry when one
+// exists, otherwise a "host:*" wildcard entry. ok is false when neither is
+// listed.
+func (p Policy) entryKey(hostport string) (string, bool) {
+	hp := strings.ToLower(hostport)
+	if p.Allow[hp] {
+		return hp, true
+	}
+	host, _, err := net.SplitHostPort(hp)
+	if err != nil {
+		return "", false
+	}
+	pattern := net.JoinHostPort(host, "*")
+	if p.Allow[pattern] {
+		return pattern, true
+	}
+	return "", false
 }
 
 // NewPolicy builds a Policy allowing the given "host:port" entries at public
@@ -86,19 +121,26 @@ func NewAnyAddressPolicy(hostports []string) Policy {
 	return pol
 }
 
-// MarkPrivate marks each hostport (and adds it to Allow) as permitted to dial
-// a private (RFC 1918 or IPv6 ULA) address as well as a public one.
-func (p *Policy) MarkPrivate(hostports ...string) {
+// Add adds each hostport to Allow as an ordinary (public-only, inspected)
+// entry. A hostport may use "*" as its port.
+func (p *Policy) Add(hostports ...string) {
 	if p.Allow == nil {
 		p.Allow = make(map[string]bool, len(hostports))
 	}
+	for _, h := range hostports {
+		p.Allow[strings.ToLower(h)] = true
+	}
+}
+
+// MarkPrivate marks each hostport (and adds it to Allow) as permitted to dial
+// a private (RFC 1918 or IPv6 ULA) address as well as a public one.
+func (p *Policy) MarkPrivate(hostports ...string) {
+	p.Add(hostports...)
 	if p.Private == nil {
 		p.Private = make(map[string]bool, len(hostports))
 	}
 	for _, h := range hostports {
-		k := strings.ToLower(h)
-		p.Allow[k] = true
-		p.Private[k] = true
+		p.Private[strings.ToLower(h)] = true
 	}
 }
 
@@ -106,57 +148,99 @@ func (p *Policy) MarkPrivate(hostports ...string) {
 // may resolve to a private address as well as a public one. It is not the
 // -allow-private mode, which is Policy.AnyPrivate and applies to unlisted hosts.
 func (p Policy) AllowsPrivate(hostport string) bool {
-	return p.Private[strings.ToLower(hostport)]
+	key, ok := p.entryKey(hostport)
+	return ok && p.Private[key]
 }
 
 // MarkAnyAddress marks each hostport (and adds it to Allow) as permitted to
 // dial any address, loopback and link-local included. Internal/test use only.
 func (p *Policy) MarkAnyAddress(hostports ...string) {
-	if p.Allow == nil {
-		p.Allow = make(map[string]bool, len(hostports))
-	}
+	p.Add(hostports...)
 	if p.AnyAddress == nil {
 		p.AnyAddress = make(map[string]bool, len(hostports))
 	}
 	for _, h := range hostports {
-		k := strings.ToLower(h)
-		p.Allow[k] = true
-		p.AnyAddress[k] = true
+		p.AnyAddress[strings.ToLower(h)] = true
 	}
 }
 
 // AllowsAnyAddress reports whether hostport bypasses the address check
 // entirely (the internal/test mark).
 func (p Policy) AllowsAnyAddress(hostport string) bool {
-	return p.AnyAddress[strings.ToLower(hostport)]
+	key, ok := p.entryKey(hostport)
+	return ok && p.AnyAddress[key]
 }
 
 // MarkNoInspect marks each hostport (and adds it to Allow) as skipping TLS
 // interception so CONNECT tunnels it untouched.
 func (p *Policy) MarkNoInspect(hostports ...string) {
-	if p.Allow == nil {
-		p.Allow = make(map[string]bool, len(hostports))
-	}
+	p.Add(hostports...)
 	if p.NoInspect == nil {
 		p.NoInspect = make(map[string]bool, len(hostports))
 	}
 	for _, h := range hostports {
-		k := strings.ToLower(h)
-		p.Allow[k] = true
-		p.NoInspect[k] = true
+		p.NoInspect[strings.ToLower(h)] = true
 	}
 }
 
 // SkipsInspect reports whether hostport is configured to bypass TLS
 // interception and be blind-tunnelled instead.
 func (p Policy) SkipsInspect(hostport string) bool {
-	return p.NoInspect[strings.ToLower(hostport)]
+	key, ok := p.entryKey(hostport)
+	return ok && p.NoInspect[key]
 }
 
 // Explicit reports whether hostport is listed, as opposed to allowed only by
 // AnyPublic.
 func (p Policy) Explicit(hostport string) bool {
-	return p.Allow[strings.ToLower(hostport)]
+	_, ok := p.entryKey(hostport)
+	return ok
+}
+
+// AuthFor returns the credential-injection metadata for hostport, if any.
+// Because it follows the same exact-then-wildcard lookup as Explicit, a
+// "host:*" entry's Auth applies to every port on that host.
+func (p Policy) AuthFor(hostport string) (AuthConfig, bool) {
+	key, ok := p.entryKey(hostport)
+	if !ok {
+		return AuthConfig{}, false
+	}
+	a, ok := p.Auth[key]
+	return a, ok
+}
+
+// SetAuth stores credential-injection metadata for hostport (and adds it to
+// Allow). The secret is never stored: Value is the environment variable's
+// name.
+func (p *Policy) SetAuth(hostport string, a AuthConfig) {
+	p.Add(hostport)
+	if p.Auth == nil {
+		p.Auth = make(map[string]AuthConfig)
+	}
+	p.Auth[strings.ToLower(hostport)] = a
+}
+
+// Merge adds every explicit entry and mark from other to p. The AnyPublic and
+// AnyPrivate transport modes are OR-ed too; MarshalPolicy does not render
+// them (rnes-proxy receives them as command-line flags).
+func (p *Policy) Merge(other Policy) {
+	for hp := range other.Allow {
+		p.Add(hp)
+	}
+	for hp := range other.Private {
+		p.MarkPrivate(hp)
+	}
+	for hp := range other.AnyAddress {
+		p.MarkAnyAddress(hp)
+	}
+	for hp := range other.NoInspect {
+		p.MarkNoInspect(hp)
+	}
+	for hp, a := range other.Auth {
+		p.SetAuth(hp, a)
+	}
+	p.AnyPublic = p.AnyPublic || other.AnyPublic
+	p.AnyPrivate = p.AnyPrivate || other.AnyPrivate
 }
 
 // Allows reports whether hostport passes the policy. With AnyPublic or

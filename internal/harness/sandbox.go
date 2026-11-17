@@ -27,7 +27,7 @@ import (
 
 const (
 	// containerHost is how the proxy container reaches the host's network
-	// namespace. Docker Desktop provides it; on Linux startProxyNet adds it
+	// namespace. Docker Desktop provides it; on Linux startProxyNetWeb adds it
 	// with --add-host. The sandbox container itself never resolves it: all
 	// its egress, including to the host's llama-server, goes through the
 	// proxy instead.
@@ -79,7 +79,7 @@ type sandboxProfile struct {
 	// mistralEnv is the container env var set to mistralPlaceholder when
 	// MistralKey is active (e.g. "MISTRAL_API_KEY" for opencode).
 	mistralEnv string
-	// extraPolicy is appended to the session's proxy policy (e.g. agy's
+	// extraPolicy is merged into the session's proxy policy (e.g. agy's
 	// no-inspect Google endpoints).
 	extraPolicy string
 	// authVolume returns the per-project Docker named volume for dir, or ""
@@ -138,7 +138,7 @@ type Sandbox struct {
 	// it (host.docker.internal:<port>), set by Configure. It's added to the
 	// proxy's allow-list; it is not the proxy's own address.
 	modelServer string
-	// allowPublic adds * to the proxy policy (see Options.AllowPublic).
+	// allowPublic passes -allow-public to the proxy (see Options.AllowPublic).
 	allowPublic bool
 	// allowPrivate starts the proxy with -allow-private (see
 	// Options.AllowPrivate).
@@ -170,7 +170,7 @@ type Sandbox struct {
 	// customPolicy, when non-nil, replaces defaultPolicy as the base of the
 	// session's egress allow-list (see Options.Policy).
 	customPolicy []byte
-	// policyFile is the host path of <cwd>/.rnes/policy.txt when present, set
+	// policyFile is the host path of <cwd>/.rnes/policy.yaml when present, set
 	// by Run and mounted read-only inside the sandbox's tmpfs-backed .rnes.
 	policyFile string
 	// configHome is the host staging directory mounted at
@@ -224,11 +224,11 @@ func checkExtraPolicy(policy []byte, profile sandboxProfile) error {
 	if len(user) == 0 {
 		return nil
 	}
-	userPol, err := proxy.ParseUserPolicy(bytes.NewReader(user))
+	userPol, err := parsePolicyYAML(bytes.NewReader(user))
 	if err != nil {
 		return fmt.Errorf("checking the session policy: %w", err)
 	}
-	extraPol, err := proxy.ParsePolicy(strings.NewReader(profile.extraPolicy))
+	extraPol, err := parsePolicyYAML(strings.NewReader(profile.extraPolicy))
 	if err != nil {
 		return fmt.Errorf("checking the %s harness policy: %w", profile.harness, err)
 	}
@@ -242,7 +242,7 @@ func checkExtraPolicy(policy []byte, profile sandboxProfile) error {
 		return nil
 	}
 	sort.Strings(conflicts)
-	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; mark it 'no-inspect' in %s or remove it there",
+	return fmt.Errorf("%s requires no-inspect access to %s, but %s lists it for TLS inspection; mark it no-inspect (or add an exact host:port entry with 'no-inspect: true') in %s, or remove it there",
 		profile.harness, strings.Join(conflicts, ", "), ProjectPolicyRel, ProjectPolicyRel)
 }
 
@@ -625,7 +625,11 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		s.webPassword = password
 		webTarget = fmt.Sprintf("%s:%d", name, webSandboxPort)
 	}
-	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, s.policy(), s.inspect, s.allowPrivate, providers, webTarget)
+	policy, err := s.policy()
+	if err != nil {
+		return err
+	}
+	pn, err := startProxyNetWeb(s.proxyImage, s.hostIP, policy, s.inspect, s.allowPrivate, s.allowPublic, providers, webTarget)
 	if err != nil {
 		return fmt.Errorf("starting sandbox proxy: %w", err)
 	}
@@ -733,37 +737,41 @@ func (s *Sandbox) applyModel(providerKey, modelID string) error {
 	return nil
 }
 
-// policy is this session's proxy allow-list: the project's policy (or the
-// shipped defaults) plus any harness-specific endpoints, llama-server, and
-// with -allow-public any public host. Built fresh each call, so sessions never
-// share or change defaultPolicy.
-func (s *Sandbox) policy() []byte {
-	var b bytes.Buffer
+// policy is this session's proxy allow-list, in the proxy's internal JSON
+// format: the project's policy (or the shipped defaults) plus any
+// harness-specific endpoints and the session's model server. AnyPublic and
+// AnyPrivate are not in the file; the proxy receives them as flags. Built
+// fresh each call, so sessions never share or change defaultPolicy.
+func (s *Sandbox) policy() ([]byte, error) {
+	base := defaultPolicy
 	if s.customPolicy != nil {
-		b.Write(s.customPolicy)
-	} else {
-		b.Write(defaultPolicy)
+		base = s.customPolicy
+	}
+	pol, err := parsePolicyYAML(bytes.NewReader(base))
+	if err != nil {
+		return nil, fmt.Errorf("parsing the session policy: %w", err)
 	}
 	if s.profile.extraPolicy != "" {
-		b.WriteString("\n" + s.profile.extraPolicy)
+		extra, err := parsePolicyYAML(strings.NewReader(s.profile.extraPolicy))
+		if err != nil {
+			return nil, fmt.Errorf("parsing the %s harness policy: %w", s.profile.harness, err)
+		}
+		pol.Merge(extra)
 	}
 	if s.modelServer != "" {
-		// The bridge gateway is normally RFC 1918 / ULA, which the scoped
+		// The bridge gateway is normally RFC 1918 / ULA, which the per-entry
 		// "private" mark allows. A custom Docker default-address-pools range
 		// outside those (e.g. CGNAT) is an unsupported niche; revisit if it
 		// comes up.
-		b.WriteString("\n# this session's llama-server\nprivate " + s.modelServer + "\n")
+		pol.MarkPrivate(s.modelServer)
 	}
 	if s.openrouterKey != "" {
-		b.WriteString("\n# OpenRouter (RNES_OPENROUTER_API_KEY is set)\nopenrouter.ai:443\n")
+		pol.Add("openrouter.ai:443")
 	}
 	if s.mistralKey != "" {
-		b.WriteString("\n# Mistral (RNES_MISTRAL_API_KEY is set)\napi.mistral.ai:443\n")
+		pol.Add("api.mistral.ai:443")
 	}
-	if s.allowPublic {
-		b.WriteString("\n# -allow-public: any public host\n*\n")
-	}
-	return b.Bytes()
+	return proxy.MarshalPolicy(pol)
 }
 
 // runArgs builds the docker argv for one session without an explicit model ID
@@ -870,7 +878,7 @@ func (s *Sandbox) projectStateMounts() []string {
 	containerStateDir := path.Join(containerWorkdir, ProjectStateDir)
 	args := []string{"--tmpfs", containerStateDir + ":ro"}
 	if s.policyFile != "" {
-		args = append(args, "--mount", bindMount(s.policyFile, path.Join(containerStateDir, "policy.txt"), true))
+		args = append(args, "--mount", bindMount(s.policyFile, path.Join(containerStateDir, "policy.yaml"), true))
 	}
 	return args
 }

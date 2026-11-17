@@ -75,9 +75,9 @@ the session's generated config so it starts on it.
 | `-image`    | `default`                                         | Bundled sandbox image to use (see below; requires `-sandbox`) |
 | `-build`    | off                                               | Rebuild the sandbox image even if it exists (requires `-sandbox`) |
 | `-sandbox-update` | off                                         | Rebuild the sandbox images from scratch, then exit without running the agent (implies `-sandbox` and `-build`). Without `-harness`, rebuilds every harness's images; with it, only that harness's (and, without `-image`, every image on its base) |
-| `-generate-policy` | off                                        | Write a starter `.rnes/policy.txt` in the current directory for `-sandbox`, then exit without running the agent |
+| `-generate-policy` | off                                        | Write a starter `.rnes/policy.yaml` in the current directory for `-sandbox`, then exit without running the agent |
 | `-allow-public` | off                                          | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
-| `-allow-private` | off                                         | Let the sandbox reach private addresses (RFC 1918 / IPv6 ULA) outside the allow-list; listed hosts keep their public-only check unless marked `private` in `policy.txt` (requires `-sandbox`; see below) |
+| `-allow-private` | off                                         | Let the sandbox reach private addresses (RFC 1918 / IPv6 ULA) outside the allow-list; listed hosts keep their public-only check unless marked `private: true` in `policy.yaml` (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
 | `-web`      | off                                               | Open the session's web UI in your browser at startup; the TUI keeps running and both share one live session |
 | `-no-web`   | off                                               | Don't serve the session's web UI at all (with `-sandbox` it is exposed on a loopback port by default) |
@@ -219,7 +219,7 @@ host. The llama-server still runs on the host; the sandbox container has no
 direct route to it and instead reaches it through its per-session egress
 proxy, which is what resolves `host.docker.internal`. The current directory
 is bind-mounted at `/workspace` (with `/workspace/.rnes` shadowed by a
-read-only tmpfs, and `<cwd>/.rnes/policy.txt` mounted read-only inside it when
+read-only tmpfs, and `<cwd>/.rnes/policy.yaml` mounted read-only inside it when
 present), and the container runs as your uid/gid with all Linux
 capabilities dropped (`--cap-drop=ALL`) and `no-new-privileges` enabled so
 files it writes keep your ownership and SUID/capability elevation is disabled.
@@ -289,40 +289,78 @@ ownership".
   `github.com`, `api.github.com`, `models.dev`, `models.opencode.ai` and
   `opencode.ai` (all over https) and blocks
   everything else, including non-HTTP protocols such as git over ssh. Those
-  built-in defaults live in `internal/harness/policy.txt` (one `host:port` per
-  line).
-  - *Per-project policy (`.rnes/policy.txt`):* run `rnes -generate-policy` in a
-    project to write a starter `.rnes/policy.txt` (it refuses to overwrite an
-    existing file). When `.rnes/policy.txt` is present, `-sandbox` uses it
+  built-in defaults live in `internal/harness/policy.yaml`.
+  - *Per-project policy (`.rnes/policy.yaml`):* run `rnes -generate-policy` in
+    a project to write a starter `.rnes/policy.yaml` (it refuses to overwrite
+    an existing file). When `.rnes/policy.yaml` is present, `-sandbox` uses it
     instead of the built-in defaults (still adding the session's llama-server
     for model-server harnesses, `openrouter.ai:443` when
     `RNES_OPENROUTER_API_KEY` is set, `api.mistral.ai:443` when
-    `RNES_MISTRAL_API_KEY` is set, and a cloud harness's own endpoints) and
+    `RNES_MISTRAL_API_KEY` is set, and a cloud harness's own endpoints), then
     prints the active allow-list at startup, marking entries that skip TLS
     interception with `(no-inspect)` and per-entry private ones with
-    `(private)`; an empty `.rnes/policy.txt` restricts the sandbox to those
-    automatic entries alone. Wildcard `*` is not permitted in
-    `.rnes/policy.txt` (use `-allow-public` on the command line instead).
-    Prefix an entry with `private` to let that one endpoint resolve to RFC 1918
-    / IPv6 ULA as well as a public address (e.g.
-    `private host.docker.internal:5432`); use `-allow-private` to reach any
-    private address outside the list. Prefix an entry with `no-inspect` to
-    tunnel its TLS traffic untouched instead of decrypting it (needed for
-    HTTP/2, gRPC, WebSockets or certificate-pinned endpoints):
-    `no-inspect example.com:443`. The two prefixes can be combined in either
-    order, e.g. `no-inspect private host.docker.internal:443`. Every
-    `-sandbox` run shadows `<cwd>/.rnes` with a read-only tmpfs at
-    `/workspace/.rnes` (rejecting symlinks) and, when the file exists, mounts
-    `<cwd>/.rnes/policy.txt` read-only inside it, so an agent inside the
-    container can never create, edit or remove `.rnes/policy.txt`. Sandbox
+    `(private)`. An empty `.rnes/policy.yaml` restricts the sandbox to those
+    automatic entries alone. See
+    [`docs/policy.example.yaml`](docs/policy.example.yaml) for a complete
+    skeleton. The schema is:
+
+    ```yaml
+    policy: v1
+    mode: allowlist
+
+    hosts:
+      # A plain entry: port 443 only, public addresses only.
+      "github.com:443": {}
+
+      # Every port on one host.
+      "example.com:*": {}
+
+      # A service on this machine or the LAN.
+      "host.docker.internal:5432":
+        private: true
+
+      # HTTP/2, gRPC, WebSockets or certificate pinning: tunnel TLS unread.
+      "grpc.example.com:443":
+        no-inspect: true
+
+      # Generic authentication provider metadata: the HTTP header to fill in,
+      # and the environment variable that will supply its value. Both must be
+      # set together and the entry must stay inspected. The schema reserves
+      # this for the auth-provider phase; injection is not active yet.
+      "api.example.com:443":
+        key: Authorization
+        value: EXAMPLE_TOKEN
+    ```
+
+    `hosts` is an allow-list: every key is a `host:port` (quote it when in
+    doubt). The port may be `*` to cover every port on that host; a wildcard
+    host is deliberately not allowed (use `-allow-public` on the command line
+    instead). An exact `host:port` entry takes precedence over a matching
+    `"host:*"` entry, including the entries rnes adds for the session's model
+    server and configured providers; those exact entries keep their own marks.
+    `private: true` lets that one endpoint resolve to RFC 1918 / IPv6 ULA as
+    well as a public address; use `-allow-private` to reach any private address
+    outside the list. `no-inspect: true` tunnels that endpoint's TLS untouched
+    instead of decrypting it (needed for HTTP/2, gRPC, WebSockets or
+    certificate-pinned endpoints). The two marks can be combined. `key`/`value`
+    are the foundation for generic authentication providers: `key` is the HTTP
+    header to set and `value` names the host environment variable holding the
+    secret; the file never contains the secret itself. Every `-sandbox` run
+    shadows `<cwd>/.rnes` with a read-only tmpfs at `/workspace/.rnes`
+    (rejecting symlinks) and, when the file exists, mounts
+    `<cwd>/.rnes/policy.yaml` read-only inside it, so an agent inside the
+    container can never create, edit or remove `.rnes/policy.yaml`. Sandbox
     runs do not create `.rnes`; `-generate-policy` is the way to add one. The
     tmpfs is deliberate: a nested bind mount of the host directory made Docker
     Desktop for Mac leave a `deny delete` ACL on it after an interrupted
     session, which then made `rm -rf` and `git worktree remove` fail. Without
-    `-sandbox`, an existing `.rnes/policy.txt` is ignored with a note.
+    `-sandbox`, an existing `.rnes/policy.yaml` is ignored with a note. A
+    legacy `.rnes/policy.txt` is rejected with a conversion error rather than
+    silently ignored: move each line under `hosts:` as `"host:port": {}` (and
+    turn old `private` / `no-inspect` prefixes into the fields above).
   - `-allow-public` opens the sandbox up to any public host over http(s)
     instead of just the allow-list. Every destination other than llama-server —
-    whether listed in `policy.txt` or opened by `-allow-public` — must still
+    whether listed in `policy.yaml` or opened by `-allow-public` — must still
     resolve to a public unicast IP when dialed, keeping your machine,
     `169.254.169.254` (cloud metadata), your LAN and VPN / CGNAT ranges blocked
     even against DNS rebinding.
@@ -331,9 +369,9 @@ ownership".
     unique-local (`fc00::/7`) — whether reached by name or IP, including the
     host and the LAN. Hosts already on the allow-list keep their public-only
     address check, so an internal host is reachable through `-allow-private`
-    when it is not listed in `.rnes/policy.txt` (the session's model server is
+    when it is not listed in `.rnes/policy.yaml` (the session's model server is
     the exception: it is marked private automatically). To open one listed
-    endpoint instead, mark it `private host:port` in `.rnes/policy.txt`.
+    endpoint instead, give it `private: true` in `.rnes/policy.yaml`.
     Public egress stays limited to the allow-list. Loopback, link-local
     (including cloud metadata `169.254.169.254`), CGNAT / Tailscale and
     multicast stay blocked. Combine with `-allow-public` when a session needs
@@ -396,7 +434,7 @@ ownership".
     `gh` login, whose scopes are broad.
   - Requires `-sandbox` (ignored with a note otherwise) and TLS interception:
     `rnes` refuses `-no-inspect` while the variable is set. If a custom
-    `.rnes/policy.txt` omits either host, requests to it stay blocked by the
+    `.rnes/policy.yaml` omits either host, requests to it stay blocked by the
     proxy.
 - **OpenRouter models:** with `RNES_OPENROUTER_API_KEY` set, the sandbox can use
   OpenRouter models alongside the local llama-server, without the key ever being
@@ -613,7 +651,7 @@ warning when they are combined.
 session's allow-list as `no-inspect` entries, so their HTTP/2 and gRPC traffic
 is tunnelled untouched instead of decrypted (some use certificate pinning).
 Hosts such as `github.com` stay TLS-intercepted, audited and
-credential-injected. A custom `.rnes/policy.txt` still applies; agy's own
+credential-injected. A custom `.rnes/policy.yaml` still applies; agy's own
 endpoints are added on top of it. If that leaves no host to intercept, the
 proxy writes the system roots alone to the sandbox's trust bundle, so real
 upstream certificates still validate.
