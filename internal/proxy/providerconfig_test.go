@@ -7,63 +7,88 @@ import (
 	"testing"
 )
 
-func TestEncodeProvidersIsOneNewlineTerminatedLine(t *testing.T) {
-	b, err := EncodeProviders([]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+func TestEncodeCredentialsIsOneNewlineTerminatedLine(t *testing.T) {
+	b, err := EncodeCredentials(
+		[]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}},
+		map[string]string{"EXAMPLE_TOKEN": "secret"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.HasSuffix(b, []byte("\n")) || bytes.Count(b, []byte("\n")) != 1 {
 		t.Errorf("want exactly one trailing newline, got %q", b)
 	}
+	if !strings.Contains(string(b), "EXAMPLE_TOKEN") || !strings.Contains(string(b), "secret") {
+		t.Errorf("credentials line = %q", b)
+	}
 }
 
-func TestReadProvidersRoundTripsAndBuildsTheGitHubProvider(t *testing.T) {
-	b, _ := EncodeProviders([]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+func TestReadCredentialsRoundTripsAndBuildsTheGitHubProvider(t *testing.T) {
+	b, _ := EncodeCredentials(
+		[]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}},
+		map[string]string{"EXAMPLE_TOKEN": "secret"},
+	)
 	// More input may follow the line (stdin isn't closed): only one line is read.
-	ps, err := ReadProviders(bufio.NewReader(bytes.NewReader(append(b, []byte("trailing")...))))
+	ps, secrets, err := ReadCredentials(bufio.NewReader(bytes.NewReader(append(b, []byte("trailing")...))))
 	if err != nil {
-		t.Fatalf("ReadProviders: %v", err)
+		t.Fatalf("ReadCredentials: %v", err)
 	}
 	if len(ps) != 1 || ps[0].Name() != "github" || ps[0].Placeholder() != "rnes_placeholder_1" {
 		t.Fatalf("providers = %+v", ps)
 	}
+	if got := secrets["EXAMPLE_TOKEN"]; got != "secret" {
+		t.Errorf("secrets = %v", secrets)
+	}
 }
 
-func TestReadProvidersRejectsBadInput(t *testing.T) {
+func TestReadCredentialsRejectsBadInput(t *testing.T) {
 	for name, in := range map[string]string{
 		"empty":            "\n",
 		"not json":         "nope\n",
 		"unknown provider": `{"providers":[{"name":"gitlab","token":"t","placeholder":"p"}]}` + "\n",
 		"bad token":        `{"providers":[{"name":"github","token":"a b","placeholder":"p"}]}` + "\n",
-		"no providers":     `{"providers":[]}` + "\n",
-		"no newline":       `{"providers":[]}`,
+		"no credentials":   `{}` + "\n",
+		"no newline":       `{}`,
+		"bad env name":     `{"secrets":{"1TOKEN":"x"}}` + "\n",
+		"empty secret":     `{"secrets":{"TOKEN":""}}` + "\n",
+		"secret newline":   `{"secrets":{"TOKEN":"a\nb"}}` + "\n",
+		"unknown field":    `{"secrets":{"TOKEN":"x"},"extra":1}` + "\n",
+		"second document":  `{"secrets":{"TOKEN":"x"}} {}` + "\n",
 		"duplicate name": `{"providers":[{"name":"github","token":"a","placeholder":"p1"},` +
 			`{"name":"github","token":"b","placeholder":"p2"}]}` + "\n",
 		"duplicate placeholder": `{"providers":[{"name":"github","token":"a","placeholder":"p"},` +
 			`{"name":"other","token":"b","placeholder":"p"}]}` + "\n",
 	} {
-		if _, err := ReadProviders(bufio.NewReader(strings.NewReader(in))); err == nil {
+		if _, _, err := ReadCredentials(bufio.NewReader(strings.NewReader(in))); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
 }
 
-func TestReadProvidersErrorsNeverEchoTheToken(t *testing.T) {
+func TestReadCredentialsErrorsNeverEchoTheToken(t *testing.T) {
 	in := `{"providers":[{"name":"github","token":"SECRET VALUE","placeholder":"p"}]}` + "\n"
-	_, err := ReadProviders(bufio.NewReader(strings.NewReader(in)))
+	_, _, err := ReadCredentials(bufio.NewReader(strings.NewReader(in)))
 	if err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Errorf("err = %v; must exist and not contain the token", err)
+	}
+
+	// The \n is a valid JSON escape that decodes to a newline; validateSecret
+	// must reject the control character, and the error must not echo it.
+	in = `{"secrets":{"TOKEN":"SECRET\nVALUE"}}` + "\n"
+	_, _, err = ReadCredentials(bufio.NewReader(strings.NewReader(in)))
+	if err == nil || strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("err = %v; must exist and not contain the secret", err)
 	}
 }
 
 // The duplicate checks must be what rejects these (the second entry names a
 // provider that doesn't exist, so a later check would also fail them).
-func TestReadProvidersNamesTheDuplicate(t *testing.T) {
+func TestReadCredentialsNamesTheDuplicate(t *testing.T) {
 	for in, want := range map[string]string{
 		`{"providers":[{"name":"github","token":"a","placeholder":"p1"},{"name":"github","token":"b","placeholder":"p2"}]}` + "\n": "listed twice",
 		`{"providers":[{"name":"github","token":"a","placeholder":"p"},{"name":"other","token":"b","placeholder":"p"}]}` + "\n":    "share a placeholder",
 	} {
-		_, err := ReadProviders(bufio.NewReader(strings.NewReader(in)))
+		_, _, err := ReadCredentials(bufio.NewReader(strings.NewReader(in)))
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, want one containing %q", err, want)
 		}
@@ -71,8 +96,12 @@ func TestReadProvidersNamesTheDuplicate(t *testing.T) {
 }
 
 func TestInjectorFromStdinBuildsTheInjectorForExplicitHosts(t *testing.T) {
-	line, _ := EncodeProviders([]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+	line, _ := EncodeCredentials(
+		[]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}},
+		map[string]string{"EXAMPLE_TOKEN": "secret"},
+	)
 	pol := NewPolicy([]string{"github.com:443", "api.github.com:443"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
 	in, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), pol, nil)
 	if err != nil {
 		t.Fatalf("InjectorFromStdin: %v", err)
@@ -80,13 +109,19 @@ func TestInjectorFromStdinBuildsTheInjectorForExplicitHosts(t *testing.T) {
 	if len(in.Providers) != 1 || in.Providers[0].Name() != "github" {
 		t.Errorf("providers = %+v", in.Providers)
 	}
+	if got := in.Secrets["EXAMPLE_TOKEN"]; got != "secret" {
+		t.Errorf("secrets = %v", in.Secrets)
+	}
 }
 
 // A bound host that a custom policy omits (or allows only via *) is logged
 // rather than failing proxy startup: the proxy itself blocks omitted hosts
 // (and never decrypts *-only hosts, so the credential is never injected there).
 func TestInjectorFromStdinLogsBoundHostsThePolicyDoesNotList(t *testing.T) {
-	line, _ := EncodeProviders([]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+	line, _ := EncodeCredentials(
+		[]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}},
+		nil,
+	)
 	pol := NewPolicy([]string{"github.com:443"}) // no api.github.com
 	audit := &auditLog{}
 	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), pol, audit.Logf); err != nil {
@@ -118,6 +153,22 @@ func TestInjectorFromStdinLogsBoundHostsThePolicyDoesNotList(t *testing.T) {
 	}
 }
 
+// A policy auth entry without a secret is inert; startup says so instead of
+// failing, since the defaults list optional cloud providers whose key may not
+// be set.
+func TestInjectorFromStdinLogsAuthEntriesWithoutSecrets(t *testing.T) {
+	line, _ := EncodeCredentials(nil, map[string]string{"OTHER": "x"})
+	pol := NewPolicy([]string{"api.example.com:443"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN"})
+	audit := &auditLog{}
+	if _, err := InjectorFromStdin(bufio.NewReader(bytes.NewReader(line)), pol, audit.Logf); err != nil {
+		t.Fatalf("InjectorFromStdin: %v", err)
+	}
+	if got := audit.String(); !strings.Contains(got, "EXAMPLE_TOKEN") || !strings.Contains(got, "api.example.com:443") {
+		t.Errorf("log = %q, want a note naming the missing variable and host", got)
+	}
+}
+
 func TestInjectorFromStdinPassesTheReadErrors(t *testing.T) {
 	_, err := InjectorFromStdin(bufio.NewReader(strings.NewReader("nope\n")), NewPolicy(nil), nil)
 	if err == nil {
@@ -125,16 +176,19 @@ func TestInjectorFromStdinPassesTheReadErrors(t *testing.T) {
 	}
 }
 
-func TestReadProvidersBuildsGitHubAndOpenRouterFromOneLine(t *testing.T) {
-	b, _ := EncodeProviders([]ProviderConfig{
-		{Name: "github", Token: "github_pat_x", Placeholder: "p1"},
-		{Name: "openrouter", Token: "sk-or-x", Placeholder: "p2"},
-	})
-	ps, err := ReadProviders(bufio.NewReader(bytes.NewReader(b)))
-	if err != nil || len(ps) != 2 {
+func TestReadCredentialsBuildsGitHubFromTheLine(t *testing.T) {
+	b, _ := EncodeCredentials(
+		[]ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "p1"}},
+		map[string]string{"RNES_OPENROUTER_API_KEY": "sk-or-x"},
+	)
+	ps, secrets, err := ReadCredentials(bufio.NewReader(bytes.NewReader(b)))
+	if err != nil || len(ps) != 1 {
 		t.Fatalf("providers = %+v, %v", ps, err)
 	}
-	if ps[1].Name() != "openrouter" || strings.Join(ps[1].Hosts(), ",") != "openrouter.ai:443" {
-		t.Errorf("openrouter provider = %s %v", ps[1].Name(), ps[1].Hosts())
+	if ps[0].Name() != "github" || strings.Join(ps[0].Hosts(), ",") != "github.com:443,api.github.com:443" {
+		t.Errorf("github provider = %s %v", ps[0].Name(), ps[0].Hosts())
+	}
+	if secrets["RNES_OPENROUTER_API_KEY"] != "sk-or-x" {
+		t.Errorf("secrets = %v", secrets)
 	}
 }

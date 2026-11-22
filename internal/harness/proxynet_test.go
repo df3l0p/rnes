@@ -194,6 +194,13 @@ func TestDefaultPolicyParses(t *testing.T) {
 			t.Errorf("default policy doesn't allow %s", want)
 		}
 	}
+	// Cloud provider hosts are added only when their key is set, so a session
+	// without one keeps the tight default egress list.
+	for _, not := range []string{"openrouter.ai:443", "api.mistral.ai:443"} {
+		if pol.Allows(not) {
+			t.Errorf("default policy allows %s without its key", not)
+		}
+	}
 	// Not needed by git or gh through the provider; kept out until something is.
 	for _, not := range []string{"codeload.github.com:443", "raw.githubusercontent.com:443", "objects.githubusercontent.com:443"} {
 		if pol.Allows(not) {
@@ -266,7 +273,7 @@ hosts:
 `
 	s := newSandbox(Options{Sandbox: true, Policy: []byte(userPolicy)}, "")
 	s.modelServer = "host.docker.internal:8080"
-	s.openrouterKey = "sk-or-test"
+	s.secrets = map[string]string{EnvOpenRouterAPIKey: "sk-or-test"}
 	raw, err := s.policy()
 	if err != nil {
 		t.Fatal(err)
@@ -519,10 +526,10 @@ func TestStartProxyNetWithInspectFollowsTheProxyLogIntoAFile(t *testing.T) {
 	}
 }
 
-func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
+func TestStartProxyNetSendsCredentialsOnStdinAndNeverInArgv(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
-	line, err := proxy.EncodeProviders([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_SECRET", Placeholder: "rnes_placeholder_1"}})
+	line, err := proxy.EncodeCredentials([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_SECRET", Placeholder: "rnes_placeholder_1"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,8 +554,8 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 			connectIdx = i
 		}
 	}
-	if !strings.Contains(runCall, " -i ") || !strings.HasSuffix(runCall, "rnes-proxy:test -intercept -providers-stdin") {
-		t.Errorf("run args = %q, want -i before the image and -intercept -providers-stdin after it", runCall)
+	if !strings.Contains(runCall, " -i ") || !strings.HasSuffix(runCall, "rnes-proxy:test -intercept -credentials-stdin") {
+		t.Errorf("run args = %q, want -i before the image and -intercept -credentials-stdin after it", runCall)
 	}
 	if !strings.Contains(attachCall, "--sig-proxy=false") || !strings.HasSuffix(attachCall, p.container) {
 		t.Errorf("attach args = %q", attachCall)
@@ -561,7 +568,7 @@ func TestStartProxyNetSendsProvidersOnStdinAndNeverInArgv(t *testing.T) {
 	}
 }
 
-func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
+func TestStartProxyNetWithoutCredentialsDoesNotAttachOrOpenStdin(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
 	p, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, nil, "")
@@ -573,13 +580,13 @@ func TestStartProxyNetWithoutProvidersDoesNotAttachOrOpenStdin(t *testing.T) {
 		if strings.HasPrefix(c, "attach ") {
 			t.Errorf("unexpected docker attach: %s", c)
 		}
-		if strings.HasPrefix(c, "run -d ") && (strings.Contains(c, " -i ") || strings.Contains(c, "-providers-stdin")) {
+		if strings.HasPrefix(c, "run -d ") && (strings.Contains(c, " -i ") || strings.Contains(c, "-credentials-stdin")) {
 			t.Errorf("run args must be unchanged without providers: %s", c)
 		}
 	}
 }
 
-func TestStartProxyNetRefusesProvidersWithoutInspect(t *testing.T) {
+func TestStartProxyNetRefusesCredentialsWithoutInspect(t *testing.T) {
 	fakeDockerProxy(t, nil, nil)
 	if _, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, false, false, false, []byte("x\n"), ""); err == nil {
 		t.Fatal("want an error: credentials can't be injected without decrypting")
@@ -591,7 +598,7 @@ func TestStartProxyNetRefusesProvidersWithoutInspect(t *testing.T) {
 func TestStartProxyNetFailsFastWhenAttachFails(t *testing.T) {
 	fakeDockerOutput(t, map[string]int{"attach": 1}, map[string]string{"logs": "", "inspect": "true"})
 	t.Setenv("TMPDIR", t.TempDir())
-	line, _ := proxy.EncodeProviders([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}})
+	line, _ := proxy.EncodeCredentials([]proxy.ProviderConfig{{Name: "github", Token: "github_pat_x", Placeholder: "rnes_placeholder_1"}}, nil)
 
 	start := time.Now()
 	_, err := startProxyNetWeb("rnes-proxy:test", "172.17.0.1", nil, true, false, false, line, "")

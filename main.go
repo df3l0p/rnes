@@ -226,24 +226,39 @@ func checkModelServerFlags(c cliConfig, needsModelServer bool) error {
 	return fmt.Errorf("%s cannot be used with -harness %s (it doesn't use llama-server)", strings.Join(given, " and "), c.harness)
 }
 
+// sessionSecrets keys the captured RNES_* credentials by the environment
+// variable names policy key/value entries use, so the harness can resolve them
+// with the same lookup as any other policy-named variable.
+func (c cliConfig) sessionSecrets() map[string]string {
+	secrets := map[string]string{}
+	if c.githubToken != "" {
+		secrets[harness.EnvGitHubToken] = c.githubToken
+	}
+	if c.openrouterKey != "" {
+		secrets[harness.EnvOpenRouterAPIKey] = c.openrouterKey
+	}
+	if c.mistralKey != "" {
+		secrets[harness.EnvMistralAPIKey] = c.mistralKey
+	}
+	return secrets
+}
+
 // harnessOptions turns the parsed flags into the harness's Options.
 func harnessOptions(c cliConfig, attached []skills.Skill, policy []byte) harness.Options {
 	return harness.Options{
-		Sandbox:       c.sandbox,
-		Image:         c.image,
-		Build:         c.build,
-		AllowPublic:   c.allowPublic,
-		AllowPrivate:  c.allowPrivate,
-		NoInspect:     c.noInspect,
-		GitHubToken:   c.githubToken,
-		OpenRouterKey: c.openrouterKey,
-		MistralKey:    c.mistralKey,
-		Skills:        attached,
-		Policy:        policy,
-		ModelSet:      c.modelSet,
-		Args:          c.args,
-		WebExpose:     !c.noWeb,
-		WebOpen:       c.web,
+		Sandbox:      c.sandbox,
+		Image:        c.image,
+		Build:        c.build,
+		AllowPublic:  c.allowPublic,
+		AllowPrivate: c.allowPrivate,
+		NoInspect:    c.noInspect,
+		Secrets:      c.sessionSecrets(),
+		Skills:       attached,
+		Policy:       policy,
+		ModelSet:     c.modelSet,
+		Args:         c.args,
+		WebExpose:    !c.noWeb,
+		WebOpen:      c.web,
 	}
 }
 
@@ -317,6 +332,12 @@ Environment:
                       Local llama stays the default; switch to a mistral model inside
                       opencode. Prompts and code context leave your machine when you
                       do.
+
+.rnes/policy.yaml can inject any host environment variable into a header for an
+allow-listed host: key names the header, value names the variable, and an
+optional format (for example "Bearer {value}") says how the secret is written.
+rnes adds such an entry for RNES_OPENROUTER_API_KEY and RNES_MISTRAL_API_KEY
+when those keys are set; see docs/policy.example.yaml.
 `
 
 // trailingArgsHelp documents the "--" passthrough.
@@ -432,8 +453,18 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 		}
 		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(shown, ", "))
 	}
-	if len(pol.Auth) > 0 {
-		fmt.Fprintf(stderr, "rnes: note: auth key/value metadata in %s is reserved for a future provider; no credential injection is active yet\n", harness.ProjectPolicyRel)
+	secrets := c.sessionSecrets()
+	for _, hp := range pol.SortedAuthHosts() {
+		a := pol.Auth[hp]
+		format := ""
+		if a.Format != "" {
+			format = fmt.Sprintf(" (format %q)", a.Format)
+		}
+		state := ""
+		if _, ok := secrets[a.Value]; !ok && os.Getenv(a.Value) == "" {
+			state = " (not set)"
+		}
+		fmt.Fprintf(stderr, "rnes: auth: %s fills %s from %s%s%s\n", hp, a.Key, a.Value, state, format)
 	}
 	return raw, nil
 }
@@ -441,28 +472,28 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 // githubTokenFromEnv returns RNES_GITHUB_TOKEN and removes it from rnes's
 // environment, so nothing rnes starts afterwards (docker, llama-server) inherits it.
 func githubTokenFromEnv() string {
-	tok := os.Getenv("RNES_GITHUB_TOKEN")
-	os.Unsetenv("RNES_GITHUB_TOKEN")
+	tok := os.Getenv(harness.EnvGitHubToken)
+	os.Unsetenv(harness.EnvGitHubToken)
 	return tok
 }
 
 // openRouterKeyFromEnv returns RNES_OPENROUTER_API_KEY and removes it from rnes's
 // environment, like githubTokenFromEnv.
 func openRouterKeyFromEnv() string {
-	key := os.Getenv("RNES_OPENROUTER_API_KEY")
-	os.Unsetenv("RNES_OPENROUTER_API_KEY")
+	key := os.Getenv(harness.EnvOpenRouterAPIKey)
+	os.Unsetenv(harness.EnvOpenRouterAPIKey)
 	return key
 }
 
 // mistralKeyFromEnv returns RNES_MISTRAL_API_KEY and removes it from rnes's
 // environment, like githubTokenFromEnv.
 func mistralKeyFromEnv() string {
-	key := os.Getenv("RNES_MISTRAL_API_KEY")
-	os.Unsetenv("RNES_MISTRAL_API_KEY")
+	key := os.Getenv(harness.EnvMistralAPIKey)
+	os.Unsetenv(harness.EnvMistralAPIKey)
 	return key
 }
 
-// activeProviders names the credential providers a session will use, for the
+// activeProviders names the credential sources a session will use, for the
 // startup line.
 func activeProviders(c cliConfig) []string {
 	var names []string
@@ -549,9 +580,9 @@ func parseFlags() (cliConfig, error) {
 	}
 	cfg.applyImplications()
 	cfg.dropSkillsForUpdate()
-	cfg.githubToken = cfg.sessionCredential("RNES_GITHUB_TOKEN", githubTokenFromEnv())
-	cfg.openrouterKey = cfg.sessionCredential("RNES_OPENROUTER_API_KEY", openRouterKeyFromEnv())
-	cfg.mistralKey = cfg.sessionCredential("RNES_MISTRAL_API_KEY", mistralKeyFromEnv())
+	cfg.githubToken = cfg.sessionCredential(harness.EnvGitHubToken, githubTokenFromEnv())
+	cfg.openrouterKey = cfg.sessionCredential(harness.EnvOpenRouterAPIKey, openRouterKeyFromEnv())
+	cfg.mistralKey = cfg.sessionCredential(harness.EnvMistralAPIKey, mistralKeyFromEnv())
 	return cfg, cfg.validate()
 }
 
@@ -620,7 +651,7 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "rnes: Mistral key: the sandbox proxy injects it at api.mistral.ai; the sandbox only holds a placeholder. Prompts leave your machine when you pick a mistral model.")
 	}
 	if names := activeProviders(cfg); len(names) > 0 {
-		fmt.Fprintln(os.Stderr, "rnes: credential providers:", strings.Join(names, ", "))
+		fmt.Fprintln(os.Stderr, "rnes: credentials:", strings.Join(names, ", "))
 	}
 	if len(attached) > 0 {
 		fmt.Fprintln(os.Stderr, "rnes: skills (read-only in the sandbox):", skills.Summary(attached))

@@ -26,11 +26,11 @@ func main() {
 	allowPrivate := flag.Bool("allow-private", false, "also allow destinations not in the policy to resolve to a private address (RFC 1918 or IPv6 ULA); listed hosts stay public-only unless marked private")
 	caOut := flag.String("ca-out", "/ca/ca.pem", "with -intercept: where to write the trust bundle (the system roots plus the session CA's certificate; the CA's key is never written)")
 	systemRoots := flag.String("system-roots", "/etc/ssl/certs/ca-certificates.crt", "with -intercept: the system trust roots to include in the bundle")
-	providersStdin := flag.Bool("providers-stdin", false, "with -intercept: read one line of provider config (credentials to inject) from stdin before listening")
+	credentialsStdin := flag.Bool("credentials-stdin", false, "with -intercept: read one line of credential config (providers and policy secret values to inject) from stdin before listening")
 	forward := flag.String("forward", "", "with the sandbox's web UI: a passive TCP forward, as listen-target (e.g. :4097=sandbox:4096); it only dials the target for accepted connections")
 	flag.Parse()
-	if *providersStdin && !*intercept {
-		log.Fatal("rnes-proxy: -providers-stdin needs -intercept: credentials can only be injected into decrypted requests")
+	if *credentialsStdin && !*intercept {
+		log.Fatal("rnes-proxy: -credentials-stdin needs -intercept: credentials can only be injected into decrypted requests")
 	}
 
 	pol, err := proxy.LoadPolicy(*policyPath)
@@ -59,7 +59,7 @@ func main() {
 			fmt.Printf("rnes-proxy: intercepting %v; trust bundle written to %s\n", pol.DNSHosts(), *caOut)
 			srv.CA = ca
 		}
-		if *providersStdin {
+		if *credentialsStdin {
 			inj, err := proxy.InjectorFromStdin(bufio.NewReader(os.Stdin), pol, log.Printf)
 			if err != nil {
 				log.Fatalf("rnes-proxy: %v", err)
@@ -73,6 +73,11 @@ func main() {
 				}
 				if len(active) > 0 {
 					fmt.Printf("rnes-proxy: provider %s will be injected at %v\n", p.Name(), active)
+				}
+			}
+			for _, h := range pol.SortedAuthHosts() {
+				if inj.Secrets[pol.Auth[h].Value] != "" {
+					fmt.Printf("rnes-proxy: auth %s will fill %s at %s\n", pol.Auth[h].Value, pol.Auth[h].Key, h)
 				}
 			}
 			if srv.CA != nil {

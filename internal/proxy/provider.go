@@ -61,21 +61,13 @@ func NewStaticProvider(name string, hosts []string, token, placeholder string) (
 }
 
 // NewGitHubProvider is the GitHub token provider: git over https
-// (github.com) and the API that gh uses (api.github.com).
+// (github.com) and the API that gh uses (api.github.com). It stays a
+// placeholder-based provider rather than a policy key/value entry because git
+// sends its credential as an HTTP Basic password, which a header template
+// can't express. Providers such as OpenRouter and Mistral, whose clients send
+// a plain Bearer header, use the policy's key/value/format instead.
 func NewGitHubProvider(token, placeholder string) (*StaticProvider, error) {
 	return NewStaticProvider("github", []string{"github.com:443", "api.github.com:443"}, token, placeholder)
-}
-
-// NewOpenRouterProvider is the OpenRouter API key provider. opencode's built-in
-// openrouter provider sends the key as a Bearer token.
-func NewOpenRouterProvider(key, placeholder string) (*StaticProvider, error) {
-	return NewStaticProvider("openrouter", []string{"openrouter.ai:443"}, key, placeholder)
-}
-
-// NewMistralProvider is the Mistral API key provider. opencode's built-in
-// mistral provider sends the key as a Bearer token.
-func NewMistralProvider(key, placeholder string) (*StaticProvider, error) {
-	return NewStaticProvider("mistral", []string{"api.mistral.ai:443"}, key, placeholder)
 }
 
 func (p *StaticProvider) Name() string        { return p.name }
@@ -97,12 +89,18 @@ func (e *CredentialError) Error() string { return e.Provider + ": credential una
 func (e *CredentialError) Unwrap() error { return e.Err }
 
 // Injector is a Server.OnRequest hook that swaps providers' placeholders for
-// their credentials.
+// their credentials, and fills in the headers described by the policy's
+// key/value entries.
 type Injector struct {
 	Providers []Provider
+	// Policy supplies the key/value auth entries. Secrets holds the values of
+	// the environment variables those entries name; a missing entry leaves the
+	// request untouched (its placeholder, if any, stays inert).
+	Policy  Policy
+	Secrets map[string]string
 	// Logf receives one audit line per injection or refusal; nil discards them.
-	// Lines name the provider and host only: never the secret, the placeholder
-	// or the query string.
+	// Lines name the provider or environment variable and host only: never the
+	// secret, the placeholder or the query string.
 	Logf func(format string, args ...any)
 }
 
@@ -114,9 +112,15 @@ func (in *Injector) logf(format string, args ...any) {
 
 // OnRequest implements Server.OnRequest. At a host a provider is bound to, it
 // replaces the provider's placeholder in the request's Authorization header
-// with the credential. That is the only place a credential is ever written: a
-// placeholder anywhere else, or at any other host, is left as it is and so
-// stays inert (the upstream just rejects it).
+// with the credential. That is the only place a provider credential is ever
+// written: a placeholder anywhere else, or at any other host, is left as it is
+// and so stays inert (the upstream just rejects it).
+//
+// A host with a policy key/value entry gets that entry's header set instead:
+// the secret from the environment variable the entry names, rendered through
+// the entry's format. It is written unconditionally, replacing whatever value
+// the sandbox sent, so a client only needs to be configured, not to mimic a
+// placeholder.
 func (in *Injector) OnRequest(r *http.Request, target string) error {
 	auth := r.Header.Get("Authorization")
 	for _, p := range in.Providers {
@@ -131,6 +135,12 @@ func (in *Injector) OnRequest(r *http.Request, target string) error {
 		auth = substitute(auth, p.Placeholder(), secret)
 		r.Header.Set("Authorization", auth)
 		in.logf("rnes-proxy: provider %s: credential injected for %s", p.Name(), target)
+	}
+	if a, ok := in.Policy.AuthFor(target); ok {
+		if secret := in.Secrets[a.Value]; secret != "" {
+			r.Header.Set(a.Key, a.HeaderValue(secret))
+			in.logf("rnes-proxy: auth %s: credential injected into %s for %s", a.Value, a.Key, target)
+		}
 	}
 	return nil
 }

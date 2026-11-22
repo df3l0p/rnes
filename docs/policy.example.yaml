@@ -41,11 +41,23 @@ hosts:
   #   private: true
   #   no-inspect: true
 
-  # Optional: generic authentication provider metadata. `key` is the HTTP
-  # header to fill in and `value` names the host environment variable holding
-  # its value. Both must be set, and the entry must stay inspected (so don't
-  # add no-inspect). The schema reserves this for the auth-provider phase;
-  # injection is not active yet.
+  # Optional: generic authentication. `key` is the HTTP header the proxy fills
+  # in and `value` names the host environment variable holding the secret. Both
+  # must be set, and the entry must stay inspected (so don't add no-inspect).
+  # `format` is optional: it says how the secret is written, with `{value}`
+  # standing for it. Without it the header value is the secret alone.
   # "api.example.com:443":
   #   key: Authorization
   #   value: EXAMPLE_TOKEN
+  #   format: Bearer {value}
+
+  # rnes adds the cloud model provider entries to the session policy when the
+  # matching RNES_* key is set. Uncomment them to allow the hosts without a key:
+  # "openrouter.ai:443":
+  #   key: Authorization
+  #   value: RNES_OPENROUTER_API_KEY
+  #   format: Bearer {value}
+  # "api.mistral.ai:443":
+  #   key: Authorization
+  #   value: RNES_MISTRAL_API_KEY
+  #   format: Bearer {value}

@@ -93,6 +93,12 @@ func TestBuildPolicyRejectsInvalidDocuments(t *testing.T) {
 		{"bad header name", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Bad Header", Value: "TOKEN"}}, "valid HTTP header name"},
 		{"bad env var", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Authorization", Value: "1TOKEN"}}, "valid environment variable name"},
 		{"auth with no-inspect", "v1", "allowlist", map[string]Entry{"example.com:443": {NoInspect: true, Key: "Authorization", Value: "TOKEN"}}, "can't be combined with no-inspect"},
+		{"format without key/value", "v1", "allowlist", map[string]Entry{"example.com:443": {Format: "Bearer {value}"}}, "format needs key and value"},
+		{"format with key only", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Authorization", Format: "Bearer {value}"}}, "format needs key and value"},
+		{"format with value only", "v1", "allowlist", map[string]Entry{"example.com:443": {Value: "TOKEN", Format: "Bearer {value}"}}, "format needs key and value"},
+		{"format without placeholder", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Authorization", Value: "TOKEN", Format: "Bearer"}}, `format must contain "{value}" exactly once`},
+		{"format with two placeholders", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Authorization", Value: "TOKEN", Format: "{value} {value}"}}, `format must contain "{value}" exactly once`},
+		{"format with a newline", "v1", "allowlist", map[string]Entry{"example.com:443": {Key: "Authorization", Value: "TOKEN", Format: "Bearer {value}\r\nX-Evil: 1"}}, "control character"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := BuildPolicy(tc.version, tc.mode, tc.hosts)
@@ -228,17 +234,17 @@ func TestParsePolicyCombinesPrivateAndNoInspect(t *testing.T) {
 
 func TestParsePolicyAuthMetadata(t *testing.T) {
 	pol, err := BuildPolicy("v1", "allowlist", map[string]Entry{
-		"api.example.com:443":   {Key: "Authorization", Value: "EXAMPLE_TOKEN"},
+		"api.example.com:443":   {Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"},
 		"wild.example.com:*":    {Key: "X-Api-Key", Value: "WILD_TOKEN"},
 		"plain.example.com:443": {},
 	})
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
-	if got, ok := pol.AuthFor("api.example.com:443"); !ok || got.Key != "Authorization" || got.Value != "EXAMPLE_TOKEN" {
+	if got, ok := pol.AuthFor("api.example.com:443"); !ok || got.Key != "Authorization" || got.Value != "EXAMPLE_TOKEN" || got.Format != "Bearer {value}" {
 		t.Errorf("AuthFor(api.example.com:443) = (%+v, %v)", got, ok)
 	}
-	if got, ok := pol.AuthFor("wild.example.com:8443"); !ok || got.Key != "X-Api-Key" || got.Value != "WILD_TOKEN" {
+	if got, ok := pol.AuthFor("wild.example.com:8443"); !ok || got.Key != "X-Api-Key" || got.Value != "WILD_TOKEN" || got.Format != "" {
 		t.Errorf("AuthFor(wild.example.com:8443) = (%+v, %v), want the wildcard entry's auth", got, ok)
 	}
 	if _, ok := pol.AuthFor("plain.example.com:443"); ok {
@@ -249,6 +255,23 @@ func TestParsePolicyAuthMetadata(t *testing.T) {
 	}
 	if len(pol.AnyAddress) != 0 {
 		t.Errorf("a policy file must never produce an any-address entry: %+v", pol.AnyAddress)
+	}
+}
+
+func TestAuthConfigHeaderValue(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format string
+		want   string
+	}{
+		{"no format", "", "s3cret"},
+		{"bearer", "Bearer {value}", "Bearer s3cret"},
+		{"only the value", "{value}", "s3cret"},
+	} {
+		got := AuthConfig{Format: tc.format}.HeaderValue("s3cret")
+		if got != tc.want {
+			t.Errorf("%s: HeaderValue = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -275,7 +298,7 @@ func TestMarshalPolicyRoundTrip(t *testing.T) {
 	pol := NewPolicy([]string{"github.com:443", "example.com:*"})
 	pol.MarkPrivate("host.docker.internal:8080")
 	pol.MarkNoInspect("grpc.example.com:443")
-	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
 	pol.SetAuth("api.example.com:*", AuthConfig{Key: "X-Api-Key", Value: "WILD_TOKEN"})
 
 	raw, err := MarshalPolicy(pol)
@@ -297,7 +320,7 @@ func TestMarshalPolicyRoundTrip(t *testing.T) {
 			t.Errorf("round trip changed no-inspect for %s", hp)
 		}
 	}
-	if a, ok := back.AuthFor("api.example.com:443"); !ok || a != (AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN"}) {
+	if a, ok := back.AuthFor("api.example.com:443"); !ok || a != (AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"}) {
 		t.Errorf("round trip lost auth metadata: %+v, %v", a, ok)
 	}
 	if a, ok := back.AuthFor("api.example.com:8443"); !ok || a != (AuthConfig{Key: "X-Api-Key", Value: "WILD_TOKEN"}) {

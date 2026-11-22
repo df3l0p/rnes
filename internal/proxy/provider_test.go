@@ -271,6 +271,37 @@ func TestInterceptInjectsTheCredentialUpstream(t *testing.T) {
 	}
 }
 
+// End to end: a policy key/value entry fills the header the upstream sees,
+// without any provider or placeholder in the request.
+func TestInterceptInjectsPolicyAuthUpstream(t *testing.T) {
+	hostport, trust := newUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Header.Get("Authorization"))
+	}))
+	ca, err := NewCA([]string{"localhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := NewAnyAddressPolicy([]string{hostport})
+	pol.SetAuth(hostport, AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
+	srv := &Server{
+		Policy:      pol,
+		CA:          ca,
+		Logf:        (&auditLog{}).Logf,
+		UpstreamTLS: &tls.Config{RootCAs: trust},
+		OnRequest: (&Injector{
+			Policy:  pol,
+			Secrets: map[string]string{"EXAMPLE_TOKEN": "s3cret"},
+		}).OnRequest,
+	}
+	px := httptest.NewServer(srv)
+	defer px.Close()
+
+	c := &injectClient{client: clientVia(mustParseURL(t, px.URL), poolOf(ca)), target: hostport}
+	if status, body := c.do(t, "", ""); status != http.StatusOK || body != "Bearer s3cret" {
+		t.Errorf("upstream saw (%d, %q), want (200, %q)", status, body, "Bearer s3cret")
+	}
+}
+
 func TestInterceptAnswers502WhenTheCredentialIsUnavailable(t *testing.T) {
 	c, hits := newInjectingProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
 		func(hostport string) Provider {
@@ -283,6 +314,75 @@ func TestInterceptAnswers502WhenTheCredentialIsUnavailable(t *testing.T) {
 	}
 	if hits.Load() != 0 || strings.Contains(body, testPlaceholder) {
 		t.Errorf("the request reached upstream (%d hits) or the body leaks the placeholder: %q", hits.Load(), body)
+	}
+}
+
+// A policy key/value entry fills the header it names with the formatted
+// secret, even when the request carried no header at all.
+func TestInjectorPolicyAuthSetsTheHeader(t *testing.T) {
+	pol := NewPolicy([]string{"api.example.com:443"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
+	audit := &auditLog{}
+	in := &Injector{Policy: pol, Secrets: map[string]string{"EXAMPLE_TOKEN": "s3cret"}, Logf: audit.Logf}
+
+	r := newReq("https://api.example.com/x", "")
+	if err := in.OnRequest(r, "api.example.com:443"); err != nil {
+		t.Fatalf("OnRequest: %v", err)
+	}
+	if got, want := r.Header.Get("Authorization"), "Bearer s3cret"; got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+	if log := audit.String(); !strings.Contains(log, "injected") || strings.Contains(log, "s3cret") {
+		t.Errorf("audit log = %q, want an injection line without the secret", log)
+	}
+}
+
+func TestInjectorPolicyAuthWithoutFormatUsesTheSecretAlone(t *testing.T) {
+	pol := NewPolicy([]string{"api.example.com:443"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "X-Api-Key", Value: "EXAMPLE_TOKEN"})
+	in := &Injector{Policy: pol, Secrets: map[string]string{"EXAMPLE_TOKEN": "s3cret"}}
+
+	r := newReq("https://api.example.com/x", "")
+	if err := in.OnRequest(r, "api.example.com:443"); err != nil {
+		t.Fatalf("OnRequest: %v", err)
+	}
+	if got := r.Header.Get("X-Api-Key"); got != "s3cret" {
+		t.Errorf("X-Api-Key = %q, want the raw secret", got)
+	}
+	if got := r.Header.Get("Authorization"); got != "" {
+		t.Errorf("unrelated header changed: Authorization = %q", got)
+	}
+}
+
+// The policy's exact-then-wildcard lookup applies to auth too: a "host:*"
+// entry authenticates every port on that host.
+func TestInjectorPolicyAuthUsesWildcardEntry(t *testing.T) {
+	pol := NewPolicy([]string{"api.example.com:*"})
+	pol.SetAuth("api.example.com:*", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
+	in := &Injector{Policy: pol, Secrets: map[string]string{"EXAMPLE_TOKEN": "s3cret"}}
+
+	r := newReq("https://api.example.com:8443/x", "")
+	if err := in.OnRequest(r, "api.example.com:8443"); err != nil {
+		t.Fatalf("OnRequest: %v", err)
+	}
+	if got := r.Header.Get("Authorization"); got != "Bearer s3cret" {
+		t.Errorf("Authorization = %q", got)
+	}
+}
+
+// Without a secret the entry is inert: the sandbox's placeholder (if any) is
+// forwarded and the upstream rejects it.
+func TestInjectorPolicyAuthWithoutASecretLeavesTheRequestAlone(t *testing.T) {
+	pol := NewPolicy([]string{"api.example.com:443"})
+	pol.SetAuth("api.example.com:443", AuthConfig{Key: "Authorization", Value: "EXAMPLE_TOKEN", Format: "Bearer {value}"})
+	in := &Injector{Policy: pol}
+
+	r := newReq("https://api.example.com/x", "Bearer placeholder")
+	if err := in.OnRequest(r, "api.example.com:443"); err != nil {
+		t.Fatalf("OnRequest: %v", err)
+	}
+	if got := r.Header.Get("Authorization"); got != "Bearer placeholder" {
+		t.Errorf("Authorization = %q, want it untouched", got)
 	}
 }
 
