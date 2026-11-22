@@ -52,6 +52,8 @@ func TestReadCredentialsRejectsBadInput(t *testing.T) {
 		"bad env name":     `{"secrets":{"1TOKEN":"x"}}` + "\n",
 		"empty secret":     `{"secrets":{"TOKEN":""}}` + "\n",
 		"secret newline":   `{"secrets":{"TOKEN":"a\nb"}}` + "\n",
+		"unknown field":    `{"secrets":{"TOKEN":"x"},"extra":1}` + "\n",
+		"second document":  `{"secrets":{"TOKEN":"x"}} {}` + "\n",
 		"duplicate name": `{"providers":[{"name":"github","token":"a","placeholder":"p1"},` +
 			`{"name":"github","token":"b","placeholder":"p2"}]}` + "\n",
 		"duplicate placeholder": `{"providers":[{"name":"github","token":"a","placeholder":"p"},` +
@@ -70,7 +72,9 @@ func TestReadCredentialsErrorsNeverEchoTheToken(t *testing.T) {
 		t.Errorf("err = %v; must exist and not contain the token", err)
 	}
 
-	in = `{"secrets":{"TOKEN":"SECRET\nVALUE"}}` + "\n" // invalid JSON escape on purpose? use a real newline is invalid JSON
+	// The \n is a valid JSON escape that decodes to a newline; validateSecret
+	// must reject the control character, and the error must not echo it.
+	in = `{"secrets":{"TOKEN":"SECRET\nVALUE"}}` + "\n"
 	_, _, err = ReadCredentials(bufio.NewReader(strings.NewReader(in)))
 	if err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Errorf("err = %v; must exist and not contain the secret", err)

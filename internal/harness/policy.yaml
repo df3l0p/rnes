@@ -39,18 +39,6 @@ hosts:
   "github.com:443": {}
   "api.github.com:443": {}
 
-  # Cloud model providers: when the matching RNES_* variable is set, the proxy
-  # fills in the Authorization header with the key as a Bearer token. The
-  # sandbox only ever holds a placeholder.
-  "openrouter.ai:443":
-    key: Authorization
-    value: RNES_OPENROUTER_API_KEY
-    format: Bearer {value}
-  "api.mistral.ai:443":
-    key: Authorization
-    value: RNES_MISTRAL_API_KEY
-    format: Bearer {value}
-
   # opencode's model catalog and website, fetched at startup
   "models.dev:443": {}
   "models.opencode.ai:443": {}

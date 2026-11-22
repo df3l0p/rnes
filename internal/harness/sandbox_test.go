@@ -679,10 +679,13 @@ func TestOpenRouterKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The defaults carry the auth entry so a key works out of the box; without
-	// a key no secret is sent and the proxy just forwards the request.
-	if a, ok := offPol.AuthFor("openrouter.ai:443"); !ok || a.Key != "Authorization" || a.Value != "RNES_OPENROUTER_API_KEY" || a.Format != "Bearer {value}" {
-		t.Errorf("default openrouter auth = (%+v, %v):\n%s", a, ok, offRaw)
+	// Without a key the host isn't allowed at all, so it can't be reached
+	// unauthenticated either.
+	if _, ok := offPol.AuthFor("openrouter.ai:443"); ok {
+		t.Errorf("default openrouter auth without a key:\n%s", offRaw)
+	}
+	if offPol.Allows("openrouter.ai:443") {
+		t.Errorf("default policy allows openrouter.ai without a key:\n%s", offRaw)
 	}
 	if b, _ := off.credentials(offRaw); b != nil {
 		t.Errorf("no key must mean no credentials, got %q", b)
@@ -720,8 +723,13 @@ func TestMistralKeyIsGatedInPolicyEnvAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a, ok := offPol.AuthFor("api.mistral.ai:443"); !ok || a.Key != "Authorization" || a.Value != "RNES_MISTRAL_API_KEY" || a.Format != "Bearer {value}" {
-		t.Errorf("default mistral auth = (%+v, %v):\n%s", a, ok, offRaw)
+	// Without a key the host isn't allowed at all, so it can't be reached
+	// unauthenticated either.
+	if _, ok := offPol.AuthFor("api.mistral.ai:443"); ok {
+		t.Errorf("default mistral auth without a key:\n%s", offRaw)
+	}
+	if offPol.Allows("api.mistral.ai:443") {
+		t.Errorf("default policy allows api.mistral.ai without a key:\n%s", offRaw)
 	}
 	if b, _ := off.credentials(offRaw); b != nil {
 		t.Errorf("no key must mean no credentials, got %q", b)
@@ -801,6 +809,65 @@ hosts:
 	}
 }
 
+// Captured RNES_* secrets are host-bound: neither the resolver nor the policy
+// may redirect them to another allowed host.
+func TestCapturedSessionSecretsAreBoundToTheirHosts(t *testing.T) {
+	s := newSandbox(Options{Secrets: map[string]string{
+		EnvGitHubToken:      "github_pat_SECRET",
+		EnvOpenRouterAPIKey: "sk-or-SECRET",
+	}}, "")
+	for _, tc := range []struct {
+		host, env, want string
+	}{
+		{"github.com:443", EnvGitHubToken, "github_pat_SECRET"},
+		{"api.github.com:443", EnvGitHubToken, "github_pat_SECRET"},
+		{"openrouter.ai:443", EnvOpenRouterAPIKey, "sk-or-SECRET"},
+		{"evil.example.com:443", EnvGitHubToken, ""},
+		{"openrouter.ai:443", EnvGitHubToken, ""},
+		{"api.mistral.ai:443", EnvOpenRouterAPIKey, ""},
+		{"github.com:8443", EnvGitHubToken, ""},
+	} {
+		if got := s.secretFor(tc.host, tc.env); got != tc.want {
+			t.Errorf("secretFor(%s, %s) = %q, want %q", tc.host, tc.env, got, tc.want)
+		}
+	}
+
+	const policy = `policy: v1
+mode: allowlist
+hosts:
+  "evil.example.com:443":
+    key: Authorization
+    value: RNES_GITHUB_TOKEN
+`
+	withPolicy := newSandbox(Options{Sandbox: true, Policy: []byte(policy), Secrets: map[string]string{EnvGitHubToken: "github_pat_SECRET"}}, "")
+	if _, err := withPolicy.policy(); err == nil || !strings.Contains(err.Error(), "RNES_GITHUB_TOKEN") || !strings.Contains(err.Error(), "evil.example.com:443") {
+		t.Errorf("err = %v, want the policy rejected before it reaches the proxy", err)
+	}
+}
+
+// A cloud key plus a no-inspect entry for its host must name the actual
+// conflict instead of failing later with a generic policy-parse error.
+func TestCloudKeyOnNoInspectHostIsATargetedError(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, env string
+	}{
+		{"openrouter", "openrouter.ai:443", EnvOpenRouterAPIKey},
+		{"mistral", "api.mistral.ai:443", EnvMistralAPIKey},
+	} {
+		policy := fmt.Sprintf("policy: v1\nmode: allowlist\nhosts:\n  %q:\n    no-inspect: true\n", tc.host)
+		s := newSandbox(Options{Sandbox: true, Policy: []byte(policy), Secrets: map[string]string{tc.env: "secret"}}, "")
+		_, err := s.policy()
+		if err == nil || !strings.Contains(err.Error(), tc.env) || !strings.Contains(err.Error(), "no-inspect") {
+			t.Errorf("%s: err = %v, want a targeted error naming %s and no-inspect", tc.name, err, tc.env)
+		}
+		// Without the key the same policy is valid: the entry stays a tunnel.
+		off := newSandbox(Options{Sandbox: true, Policy: []byte(policy)}, "")
+		if _, err := off.policy(); err != nil {
+			t.Errorf("%s: without a key the policy is valid: %v", tc.name, err)
+		}
+	}
+}
+
 func TestSandboxRunSendsTheOpenRouterKeyOnStdinNotArgv(t *testing.T) {
 	logPath := fakeDockerProxy(t, nil, nil)
 	t.Setenv("TMPDIR", t.TempDir())
@@ -849,11 +916,19 @@ func TestConfigureDropsEveryLiteralProviderAPIKey(t *testing.T) {
 }
 
 func TestConfigureWarningSeparatesProxiedFromLostProviders(t *testing.T) {
+	t.Setenv("PROJECT_OPENROUTER_KEY", "proj-SECRET")
 	host := filepath.Join(t.TempDir(), "opencode.jsonc")
 	if err := os.WriteFile(host, []byte(`{"providers":{"openrouter":{"settings":{"apiKey":"sk-or-REAL"}},"mistral":{"settings":{"apiKey":"mis-REAL"}},"vllm":{"settings":{"apiKey":"sk-vllm-REAL"}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Only a dropped key of a proxied provider with a session key is
+	const projectPolicy = `policy: v1
+mode: allowlist
+hosts:
+  "openrouter.ai:443":
+    key: Authorization
+    value: PROJECT_OPENROUTER_KEY
+`
+	// Only a dropped key of a proxied provider with a resolvable secret is
 	// injected back; everything else is simply lost, and the warning must
 	// not claim the proxy covers it.
 	for _, tc := range []struct {
@@ -865,6 +940,12 @@ func TestConfigureWarningSeparatesProxiedFromLostProviders(t *testing.T) {
 			name: "openrouter key set",
 			opts: Options{Sandbox: true, Secrets: map[string]string{EnvOpenRouterAPIKey: "or-SECRET"}},
 			want: "the proxy injects its key for openrouter (from RNES_OPENROUTER_API_KEY); " +
+				"mistral, vllm models don't work in the sandbox without a key of their own",
+		},
+		{
+			name: "project policy names its own variable",
+			opts: Options{Sandbox: true, Policy: []byte(projectPolicy), Secrets: map[string]string{EnvOpenRouterAPIKey: "unused-SECRET"}},
+			want: "the proxy injects its key for openrouter (from PROJECT_OPENROUTER_KEY); " +
 				"mistral, vllm models don't work in the sandbox without a key of their own",
 		},
 		{

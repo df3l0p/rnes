@@ -2,11 +2,11 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"unicode"
 )
 
@@ -54,8 +54,14 @@ func ReadCredentials(r *bufio.Reader) ([]Provider, map[string]string, error) {
 		return nil, nil, fmt.Errorf("reading credential config: %w", err)
 	}
 	var msg credentialsMessage
-	if err := json.Unmarshal(line, &msg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&msg); err != nil {
 		return nil, nil, errors.New("credential config isn't valid JSON")
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, nil, errors.New("credential config must contain exactly one JSON object")
 	}
 	if len(msg.Providers) == 0 && len(msg.Secrets) == 0 {
 		return nil, nil, errors.New("credential config lists no credentials")
@@ -125,12 +131,7 @@ func InjectorFromStdin(r *bufio.Reader, pol Policy, logf func(string, ...any)) (
 			}
 		}
 	}
-	hosts := make([]string, 0, len(pol.Auth))
-	for h := range pol.Auth {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
-	for _, h := range hosts {
+	for _, h := range pol.SortedAuthHosts() {
 		if secrets[pol.Auth[h].Value] == "" {
 			in.logf("rnes-proxy: auth %s: no secret was provided for %s; requests to %s won't be authenticated", pol.Auth[h].Value, pol.Auth[h].Key, h)
 		}

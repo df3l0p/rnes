@@ -51,10 +51,8 @@ hosts:
   #   value: EXAMPLE_TOKEN
   #   format: Bearer {value}
 
-  # The built-in defaults configure the cloud model providers this way. A
-  # project policy replaces those defaults, but rnes still adds these entries
-  # when the matching RNES_* key is set. Uncomment them to allow the hosts
-  # without a key:
+  # rnes adds the cloud model provider entries to the session policy when the
+  # matching RNES_* key is set. Uncomment them to allow the hosts without a key:
   # "openrouter.ai:443":
   #   key: Authorization
   #   value: RNES_OPENROUTER_API_KEY

@@ -186,7 +186,6 @@ func TestDefaultPolicyParses(t *testing.T) {
 		"registry.npmjs.org:443", "github.com:443", "models.dev:443",
 		"models.opencode.ai:443", "opencode.ai:443",
 		"api.github.com:443",
-		"openrouter.ai:443", "api.mistral.ai:443",
 		"proxy.golang.org:443", "sum.golang.org:443",
 		"pypi.org:443", "files.pythonhosted.org:443",
 		"crates.io:443", "static.crates.io:443",
@@ -195,12 +194,11 @@ func TestDefaultPolicyParses(t *testing.T) {
 			t.Errorf("default policy doesn't allow %s", want)
 		}
 	}
-	for hp, want := range map[string]proxy.AuthConfig{
-		"openrouter.ai:443":  {Key: "Authorization", Value: "RNES_OPENROUTER_API_KEY", Format: "Bearer {value}"},
-		"api.mistral.ai:443": {Key: "Authorization", Value: "RNES_MISTRAL_API_KEY", Format: "Bearer {value}"},
-	} {
-		if got, ok := pol.AuthFor(hp); !ok || got != want {
-			t.Errorf("default policy auth for %s = (%+v, %v), want %+v", hp, got, ok, want)
+	// Cloud provider hosts are added only when their key is set, so a session
+	// without one keeps the tight default egress list.
+	for _, not := range []string{"openrouter.ai:443", "api.mistral.ai:443"} {
+		if pol.Allows(not) {
+			t.Errorf("default policy allows %s without its key", not)
 		}
 	}
 	// Not needed by git or gh through the provider; kept out until something is.

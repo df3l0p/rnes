@@ -476,18 +476,32 @@ func TestResolvePolicyHandlesHostAndSandbox(t *testing.T) {
 	}
 
 	// Auth metadata is active, and startup names the header and source variable
-	// (never the secret).
+	// (never the secret). An unset variable is called out so the line doesn't
+	// read as active injection.
 	buf.Reset()
+	t.Setenv("EXAMPLE_TOKEN", "")
 	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"api.example.com:443\": {key: Authorization, value: EXAMPLE_TOKEN, format: \"Bearer {value}\"}}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolvePolicy(cliConfig{sandbox: true}, cwd, &buf); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"auth: api.example.com:443", "Authorization", "EXAMPLE_TOKEN", "Bearer {value}"} {
+	for _, want := range []string{"auth: api.example.com:443", "Authorization", "EXAMPLE_TOKEN", "Bearer {value}", "EXAMPLE_TOKEN (not set)"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("startup output = %q, want it to mention %q", buf.String(), want)
 		}
+	}
+
+	// A captured RNES_* key counts even though parseFlags already unset it.
+	buf.Reset()
+	if err := os.WriteFile(filepath.Join(cwd, ".rnes", "policy.yaml"), []byte("policy: v1\nmode: allowlist\nhosts: {\"openrouter.ai:443\": {key: Authorization, value: RNES_OPENROUTER_API_KEY, format: \"Bearer {value}\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvePolicy(cliConfig{sandbox: true, openrouterKey: "sk-or-SECRET"}, cwd, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "RNES_OPENROUTER_API_KEY (not set)") {
+		t.Errorf("startup output = %q, must not mark a captured key as not set", buf.String())
 	}
 
 	// Host mode notes a legacy policy.txt instead of silently ignoring it.

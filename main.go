@@ -336,8 +336,8 @@ Environment:
 .rnes/policy.yaml can inject any host environment variable into a header for an
 allow-listed host: key names the header, value names the variable, and an
 optional format (for example "Bearer {value}") says how the secret is written.
-The built-in defaults do this for RNES_OPENROUTER_API_KEY and
-RNES_MISTRAL_API_KEY; see docs/policy.example.yaml.
+rnes adds such an entry for RNES_OPENROUTER_API_KEY and RNES_MISTRAL_API_KEY
+when those keys are set; see docs/policy.example.yaml.
 `
 
 // trailingArgsHelp documents the "--" passthrough.
@@ -453,13 +453,18 @@ func resolvePolicy(c cliConfig, cwd string, stderr io.Writer) ([]byte, error) {
 		}
 		fmt.Fprintf(stderr, "rnes: sandbox policy (%s): %s\n", harness.ProjectPolicyRel, strings.Join(shown, ", "))
 	}
+	secrets := c.sessionSecrets()
 	for _, hp := range pol.SortedAuthHosts() {
 		a := pol.Auth[hp]
 		format := ""
 		if a.Format != "" {
 			format = fmt.Sprintf(" (format %q)", a.Format)
 		}
-		fmt.Fprintf(stderr, "rnes: auth: %s fills %s from %s%s\n", hp, a.Key, a.Value, format)
+		state := ""
+		if _, ok := secrets[a.Value]; !ok && os.Getenv(a.Value) == "" {
+			state = " (not set)"
+		}
+		fmt.Fprintf(stderr, "rnes: auth: %s fills %s from %s%s%s\n", hp, a.Key, a.Value, state, format)
 	}
 	return raw, nil
 }

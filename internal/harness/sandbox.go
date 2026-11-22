@@ -479,23 +479,20 @@ func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) erro
 		// warning must say which is which instead of claiming the proxy
 		// covers them all.
 		var proxied, lost []string
+		injected := map[string]string{}
 		for _, id := range dropped {
-			switch {
-			case id == "openrouter" && s.secrets[EnvOpenRouterAPIKey] != "", id == "mistral" && s.secrets[EnvMistralAPIKey] != "":
+			if env, ok := s.injectedFrom(cloudProviderHosts[id]); ok {
 				proxied = append(proxied, id)
-			default:
-				lost = append(lost, id)
+				injected[id] = env
+				continue
 			}
+			lost = append(lost, id)
 		}
 		fmt.Fprintf(os.Stderr, "rnes: warning: removed the apiKey of %s from the sandbox's copy of your opencode config so it never reaches the container", strings.Join(dropped, ", "))
 		if len(proxied) > 0 {
 			var from []string
 			for _, id := range proxied {
-				env := "RNES_OPENROUTER_API_KEY"
-				if id == "mistral" {
-					env = "RNES_MISTRAL_API_KEY"
-				}
-				from = append(from, id+" (from "+env+")")
+				from = append(from, id+" (from "+injected[id]+")")
 			}
 			fmt.Fprintf(os.Stderr, "; the proxy injects its key for %s", strings.Join(from, ", "))
 		}
@@ -738,26 +735,91 @@ func (s *Sandbox) applyModel(providerKey, modelID string) error {
 	return nil
 }
 
-// policy is this session's proxy allow-list, in the proxy's internal JSON
-// format: the project's policy (or the shipped defaults) plus any
-// harness-specific endpoints and the session's model server. AnyPublic and
-// AnyPrivate are not in the file; the proxy receives them as flags. Built
-// fresh each call, so sessions never share or change defaultPolicy.
-func (s *Sandbox) policy() ([]byte, error) {
+// cloudAuths are the built-in key/value entries rnes adds to the session
+// policy when the matching captured key is set. The shipped defaults omit the
+// hosts, so a session without a key doesn't grow its egress allow-list.
+var cloudAuths = []struct {
+	env  string
+	host string
+	auth proxy.AuthConfig
+}{
+	{EnvOpenRouterAPIKey, "openrouter.ai:443", openRouterAuth},
+	{EnvMistralAPIKey, "api.mistral.ai:443", mistralAuth},
+}
+
+// cloudProviderHosts maps an opencode cloud provider ID to the policy host
+// whose auth entry re-injects its key.
+var cloudProviderHosts = map[string]string{
+	"openrouter": "openrouter.ai:443",
+	"mistral":    "api.mistral.ai:443",
+}
+
+// sessionPolicy is this session's proxy allow-list before the model server is
+// added: the project's policy (or the shipped defaults), any harness-specific
+// endpoints, and the built-in auth entries for the cloud keys that are set.
+// AnyPublic and AnyPrivate are never in it; the proxy receives them as flags.
+// Built fresh each call, so sessions never share or change defaultPolicy.
+func (s *Sandbox) sessionPolicy() (proxy.Policy, error) {
 	base := defaultPolicy
 	if s.customPolicy != nil {
 		base = s.customPolicy
 	}
 	pol, err := parsePolicyYAML(bytes.NewReader(base))
 	if err != nil {
-		return nil, fmt.Errorf("parsing the session policy: %w", err)
+		return proxy.Policy{}, fmt.Errorf("parsing the session policy: %w", err)
 	}
 	if s.profile.extraPolicy != "" {
 		extra, err := parsePolicyYAML(strings.NewReader(s.profile.extraPolicy))
 		if err != nil {
-			return nil, fmt.Errorf("parsing the %s harness policy: %w", s.profile.harness, err)
+			return proxy.Policy{}, fmt.Errorf("parsing the %s harness policy: %w", s.profile.harness, err)
 		}
 		pol.Merge(extra)
+	}
+	// A captured session secret is only injected at the host rnes binds it to.
+	// Reject a policy that names one elsewhere: allowing the entry but dropping
+	// the secret would leave the wrong header in place, and forwarding it would
+	// let a committed policy redirect the operator's credential.
+	for hp, a := range pol.Auth {
+		bound, ok := sessionSecretHosts[a.Value]
+		if !ok {
+			continue
+		}
+		allowed := false
+		for _, h := range bound {
+			if h == hp {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return proxy.Policy{}, fmt.Errorf("%s can only be injected at %s; the session policy names it for %s", a.Value, strings.Join(bound, " or "), hp)
+		}
+	}
+	// With a key set, make sure the session can actually use it, while leaving
+	// an explicit exact entry (and its own auth settings) alone. Adding an
+	// exact entry also beats a user's "host:*" wildcard, so that can't turn
+	// this host into a no-inspect tunnel where injection is impossible.
+	for _, c := range cloudAuths {
+		if s.secrets[c.env] == "" {
+			continue
+		}
+		if _, ok := pol.Auth[c.host]; ok {
+			continue
+		}
+		if pol.NoInspect[c.host] {
+			return proxy.Policy{}, fmt.Errorf("%s is set, but the session policy marks %s no-inspect; credential injection needs TLS inspection, so remove no-inspect there or unset the key", c.env, c.host)
+		}
+		pol.SetAuth(c.host, c.auth)
+	}
+	return pol, nil
+}
+
+// policy is sessionPolicy plus the session's model server, rendered in the
+// proxy's internal JSON format.
+func (s *Sandbox) policy() ([]byte, error) {
+	pol, err := s.sessionPolicy()
+	if err != nil {
+		return nil, err
 	}
 	if s.modelServer != "" {
 		// The bridge gateway is normally RFC 1918 / ULA, which the per-entry
@@ -766,22 +828,26 @@ func (s *Sandbox) policy() ([]byte, error) {
 		// comes up.
 		pol.MarkPrivate(s.modelServer)
 	}
-	// The built-in defaults already carry these entries, but a custom project
-	// policy may not. With a key set, make sure the session can actually use it,
-	// while leaving an explicit exact entry (and its own auth settings) alone.
-	// Adding an exact entry also beats a user's "host:*" wildcard, so that can't
-	// turn this host into a no-inspect tunnel where injection is impossible.
-	if s.secrets[EnvOpenRouterAPIKey] != "" {
-		if _, ok := pol.Auth["openrouter.ai:443"]; !ok {
-			pol.SetAuth("openrouter.ai:443", openRouterAuth)
-		}
-	}
-	if s.secrets[EnvMistralAPIKey] != "" {
-		if _, ok := pol.Auth["api.mistral.ai:443"]; !ok {
-			pol.SetAuth("api.mistral.ai:443", mistralAuth)
-		}
-	}
 	return proxy.MarshalPolicy(pol)
+}
+
+// injectedFrom returns the environment variable whose secret the session
+// policy will inject at hostport, if any. It resolves the effective policy the
+// same way policy() does, so a project policy's own auth entry (and its own
+// variable) counts even when it overrides a built-in provider.
+func (s *Sandbox) injectedFrom(hostport string) (string, bool) {
+	if hostport == "" {
+		return "", false
+	}
+	pol, err := s.sessionPolicy()
+	if err != nil || pol.SkipsInspect(hostport) {
+		return "", false
+	}
+	a, ok := pol.AuthFor(hostport)
+	if !ok || s.secretFor(hostport, a.Value) == "" {
+		return "", false
+	}
+	return a.Value, true
 }
 
 // runArgs builds the docker argv for one session without an explicit model ID
@@ -1127,8 +1193,8 @@ func (s *Sandbox) credentials(policyJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parsing the session policy for credentials: %w", err)
 	}
 	secrets := map[string]string{}
-	for _, auth := range pol.Auth {
-		if secret := s.secretFor(auth.Value); secret != "" {
+	for hp, auth := range pol.Auth {
+		if secret := s.secretFor(hp, auth.Value); secret != "" {
 			secrets[auth.Value] = secret
 		}
 	}
@@ -1138,13 +1204,28 @@ func (s *Sandbox) credentials(policyJSON []byte) ([]byte, error) {
 	return proxy.EncodeCredentials(cfgs, secrets)
 }
 
-// secretFor resolves the environment variable a policy auth entry names. The
-// RNES_* session variables are captured and unset by main before the harness
-// runs, so they come from Options.Secrets; any other name is read from the host
-// environment.
-func (s *Sandbox) secretFor(env string) string {
+// sessionSecretHosts binds each captured RNES_* session credential to the
+// hosts rnes itself uses it for. A project policy may name one of these
+// variables, but only for its own host: otherwise a committed policy could
+// redirect the operator's token to an allow-listed host it controls.
+var sessionSecretHosts = map[string][]string{
+	EnvGitHubToken:      {"github.com:443", "api.github.com:443"},
+	EnvOpenRouterAPIKey: {"openrouter.ai:443"},
+	EnvMistralAPIKey:    {"api.mistral.ai:443"},
+}
+
+// secretFor resolves the environment variable a policy auth entry names for
+// hostport. The RNES_* session variables are captured and unset by main before
+// the harness runs, so they come from Options.Secrets and only for their
+// bound hosts; any other name is read from the host environment.
+func (s *Sandbox) secretFor(hostport, env string) string {
 	if secret := s.secrets[env]; secret != "" {
-		return secret
+		for _, h := range sessionSecretHosts[env] {
+			if h == hostport {
+				return secret
+			}
+		}
+		return ""
 	}
 	return os.Getenv(env)
 }

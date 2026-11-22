@@ -292,9 +292,10 @@ ownership".
   model server plus `registry.npmjs.org`, `proxy.golang.org`, `sum.golang.org`,
   `pypi.org`, `files.pythonhosted.org`, `crates.io`, `static.crates.io`,
   `github.com`, `api.github.com`, `models.dev`, `models.opencode.ai` and
-  `opencode.ai` (all over https) and blocks
-  everything else, including non-HTTP protocols such as git over ssh. Those
-  built-in defaults live in `internal/harness/policy.yaml`.
+  `opencode.ai` (all over https). A cloud model provider's host is added when
+  its key is set (see below). Everything else is blocked, including non-HTTP
+  protocols such as git over ssh. Those built-in defaults live in
+  `internal/harness/policy.yaml`.
   - *Per-project policy (`.rnes/policy.yaml`):* run `rnes -generate-policy` in
     a project to write a starter `.rnes/policy.yaml` (it refuses to overwrite
     an existing file). When `.rnes/policy.yaml` is present, `-sandbox` uses it
@@ -357,7 +358,10 @@ ownership".
     proxy overwrites that header only when forwarding to the listed host.
     Treat `.rnes/policy.yaml` as trusted input: a project-provided file can name
     any environment variable, so review it before running in a repository you
-    don't trust. Every `-sandbox` run
+    don't trust. The captured `RNES_*` session credentials are the exception:
+    each one can only be injected at the hosts rnes binds it to
+    (`github.com`/`api.github.com`, `openrouter.ai`, `api.mistral.ai`), and a
+    policy entry naming one for another host is rejected. Every `-sandbox` run
     shadows `<cwd>/.rnes` with a read-only tmpfs at `/workspace/.rnes`
     (rejecting symlinks) and, when the file exists, mounts
     `<cwd>/.rnes/policy.yaml` read-only inside it, so an agent inside the
@@ -456,9 +460,10 @@ ownership".
   inside it. Local llama stays the default (`-model` is unchanged); switch to
   an OpenRouter model inside opencode, which ships `openrouter` as a built-in
   provider.
-  - *Mechanism:* a policy key/value entry, not a special provider. The built-in
-    policy lists `openrouter.ai:443` with `key: Authorization`,
-    `value: RNES_OPENROUTER_API_KEY` and `format: Bearer {value}`. `rnes` reads
+  - *Mechanism:* a policy key/value entry, not a special provider. With the key
+    set, rnes adds `openrouter.ai:443` to the session policy with
+    `key: Authorization`, `value: RNES_OPENROUTER_API_KEY` and
+    `format: Bearer {value}`. `rnes` reads
     and unsets the variable, sends the key to the proxy on stdin, and gives the
     sandbox only `OPENROUTER_API_KEY=<placeholder>`. The proxy sets
     `Authorization: Bearer <key>` on requests to that host, so injection works
@@ -485,8 +490,8 @@ ownership".
     `rnes` refuses `-no-inspect` while the variable is set.
 - **Mistral models:** with `RNES_MISTRAL_API_KEY` set, the sandbox can use
   Mistral models alongside the local llama-server, by the same mechanism as
-  OpenRouter models above: the built-in policy lists `api.mistral.ai:443` with
-  a `Bearer {value}` entry for `RNES_MISTRAL_API_KEY`, the sandbox only gets
+  OpenRouter models above: rnes adds `api.mistral.ai:443` to the session policy
+  with a `Bearer {value}` entry for `RNES_MISTRAL_API_KEY`, the sandbox only gets
   `MISTRAL_API_KEY=<placeholder>`, and the proxy fills in the `Authorization`
   header at that host. To reuse the key opencode stores (same
   `opencode auth login` sign-in as on the host):
