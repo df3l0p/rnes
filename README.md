@@ -69,7 +69,7 @@ the session's generated config so it starts on it.
 
 | Flag        | Default                                          | Description                                     |
 |-------------|---------------------------------------------------|--------------------------------------------------|
-| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; only a sandbox session starts on it — on the host, pick it via `/models` (opencode) or `/model` (vibe). With `-harness agy`, forwarded as `--model` only when given |
+| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; a sandbox session starts on it, and so does `-harness vibe` on the host (via `VIBE_ACTIVE_MODEL`). With opencode on the host, pick it via `/models`. With `-harness agy`, forwarded as `--model` only when given |
 | `-host`     | `127.0.0.1`                                       | llama-server host (with `-sandbox`, the narrowest address containers can reach; see below); rejected for harnesses that don't use llama-server |
 | `-port`     | `8080`                                            | llama-server port; rejected for harnesses that don't use llama-server |
 | `-harness`  | `opencode`                                        | Coding agent to run: `opencode`, `agy` (see *Antigravity* below) or `vibe` (see *Vibe* below) |
@@ -94,6 +94,7 @@ doesn't own reach the agent unchanged:
 rnes -sandbox -harness agy -- --version
 rnes -sandbox -harness agy -- --continue
 rnes -sandbox -harness opencode -- --continue
+rnes -sandbox -harness vibe -- --continue
 ```
 
 ### Worktrees
@@ -249,9 +250,11 @@ ownership".
   default — and puts it in a staged `~/.vibe` that is removed when the session
   ends. Nothing is copied from your own `config.toml`, so no credential it
   holds (an MCP server's static header, a provider's `extra_headers`) reaches
-  the container; the cost is that your own providers, models and MCP servers
-  are not available in a vibe sandbox session. `agy` has no generated config;
-  it keeps its own state in a per-project volume (see *Antigravity* below).
+  the container; the cost is that the providers, models and MCP servers in your
+  own `config.toml` are not available in a vibe sandbox session. A project
+  `.vibe/config.toml` in the workspace still loads (see *Vibe* below), as does
+  anything else in the mounted directory. `agy` has no generated config; it
+  keeps its own state in a per-project volume (see *Antigravity* below).
 - **Images:** `-image <name>` selects one of the images bundled in
   [`images/`](images), each a `<name>.Dockerfile`. The default, `default`,
   adds `jq`, `ripgrep`, `curl` and `gh` on top of the selected harness's base
@@ -744,8 +747,10 @@ ends:
 - Nothing is copied from your own `config.toml`. Vibe's config can hold
   literal secrets (an MCP server's static header, a provider's
   `extra_headers`), and none of them may reach the container. The trade-off is
-  that your own providers, models and MCP servers are not available in a vibe
-  sandbox session.
+  that the providers, models and MCP servers in your own `config.toml` are not
+  available in a vibe sandbox session. A project `.vibe/config.toml` in the
+  workspace still loads (it is a workspace file the agent can read anyway), so
+  a repository can carry its own providers and MCP servers.
 - `enable_telemetry`, `enable_update_checks`, `enable_auto_update`,
   `enable_connectors` and `[experiments] enable` are off: the sandbox's egress
   is allow-listed and audited, and none of them is needed to do the work.

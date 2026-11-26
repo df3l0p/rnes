@@ -297,8 +297,10 @@ func TestVibeHostRunForwardsArgsAndRunsInTheProject(t *testing.T) {
 	modelPath := filepath.Join(dir, "model")
 	// The session's model rides in VIBE_ACTIVE_MODEL: the TUI takes no model
 	// flag, and rewriting the user's active_model would outlive the session.
-	script := "#!/bin/sh\necho \"$*\" >> " + logPath + "\npwd >> " + logPath + "\n" +
-		"[ \"$1\" = --version ] || echo \"$VIBE_ACTIVE_MODEL\" > " + modelPath + "\n"
+	script := "#!/bin/sh\necho \"$*\" >> " + logPath + "\n" +
+		"if [ \"$1\" = --version ]; then echo 'vibe 3.1.2'; exit 0; fi\n" +
+		"pwd >> " + logPath + "\n" +
+		"echo \"$VIBE_ACTIVE_MODEL\" > " + modelPath + "\n"
 	bin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -325,18 +327,18 @@ func TestVibeHostRunForwardsArgsAndRunsInTheProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) < 4 {
+	if len(lines) < 3 {
 		t.Fatalf("vibe log = %q, want the argv and working directory of both calls", lines)
 	}
 	// Available's --version call comes first, then the session's.
 	if lines[0] != "--version" {
 		t.Errorf("first call = %q, want --version", lines[0])
 	}
-	if lines[2] != "--continue" {
-		t.Errorf("run argv = %q, want --continue", lines[2])
+	if lines[1] != "--continue" {
+		t.Errorf("run argv = %q, want --continue", lines[1])
 	}
-	if real, _ := filepath.EvalSymlinks(project); lines[3] != project && lines[3] != real {
-		t.Errorf("vibe ran in %q, want the project %q", lines[3], project)
+	if real, _ := filepath.EvalSymlinks(project); lines[2] != project && lines[2] != real {
+		t.Errorf("vibe ran in %q, want the project %q", lines[2], project)
 	}
 
 	// Without this the session would start on Vibe's own default, a cloud
@@ -347,6 +349,29 @@ func TestVibeHostRunForwardsArgsAndRunsInTheProject(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(model)); got != "m-one" {
 		t.Errorf("VIBE_ACTIVE_MODEL = %q, want m-one", got)
+	}
+}
+
+func TestVibeAvailableChecksTheVersionFloor(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		want bool
+	}{
+		{"vibe 3.1.2\n", true},
+		{"vibe 2.0.0\n", true},
+		{"2.14.1\n", true},
+		{"vibe 1.9.0\n", false},
+		{"vibe 0.4.0\n", false},
+		{"", false},
+		{"not a version\n", false},
+	} {
+		err := vibeIsSupported(tc.out)
+		if tc.want && err != nil {
+			t.Errorf("vibeIsSupported(%q) = %v, want nil", tc.out, err)
+		}
+		if !tc.want && err == nil {
+			t.Errorf("vibeIsSupported(%q) = nil, want an error", tc.out)
+		}
 	}
 }
 

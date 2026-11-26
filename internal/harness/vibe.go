@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/df3l0p/rnes/internal/vibeconfig"
@@ -77,8 +78,25 @@ func (v Vibe) Available() error {
 	if _, err := exec.LookPath("vibe"); err != nil {
 		return fmt.Errorf("vibe not found on PATH: %w", err)
 	}
-	if out, err := exec.Command("vibe", "--version").CombinedOutput(); err != nil {
-		return fmt.Errorf("running vibe --version: %w: %s", err, strings.TrimSpace(string(out)))
+	out, err := exec.Command("vibe", "--version").Output()
+	if err != nil {
+		return fmt.Errorf("running vibe --version: %w", err)
+	}
+	return vibeIsSupported(string(out))
+}
+
+// vibeIsSupported reports an error unless out (the output of vibe --version)
+// names Vibe 2 or newer. The generated sandbox config sets settings that older
+// releases don't have (enable_auto_update arrived in 2.0.0), which they would
+// report as unknown on every session, and the [[providers]]/[[models]] shape
+// rnes merges into the host config is the same one.
+func vibeIsSupported(out string) error {
+	m := versionRE.FindStringSubmatch(out)
+	if m == nil {
+		return fmt.Errorf("couldn't read a version from %q", strings.TrimSpace(out))
+	}
+	if major, err := strconv.Atoi(m[1]); err != nil || major < 2 {
+		return fmt.Errorf("vibe %s is too old: rnes needs Vibe 2 or newer (upgrade with `uv tool upgrade mistral-vibe`)", strings.TrimSpace(out))
 	}
 	return nil
 }
