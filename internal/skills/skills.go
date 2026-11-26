@@ -78,9 +78,9 @@ type Request struct {
 	// Cwd is the working directory: relative paths are resolved against it,
 	// and it is checked for project skills of the same name.
 	Cwd string
-	// Harness names the active harness (e.g. "opencode", "agy"), putting its
-	// own global skills folder first in DefaultSourcesFor; empty defaults to
-	// "opencode".
+	// Harness names the active harness (e.g. "opencode", "agy", "vibe"),
+	// putting its own global skills folder first in DefaultSourcesFor; empty
+	// defaults to "opencode".
 	Harness string
 }
 

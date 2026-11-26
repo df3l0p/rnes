@@ -27,6 +27,9 @@ type Vibe struct {
 }
 
 func newVibe(opts Options) (Harness, error) {
+	if opts.Sandbox {
+		return newSandboxWithProfile(opts, vibeProfile()), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolving home directory: %w", err)
@@ -35,11 +38,7 @@ func newVibe(opts Options) (Harness, error) {
 	if vibeHome == "" {
 		vibeHome = filepath.Join(home, ".vibe")
 	}
-	configPath := filepath.Join(vibeHome, "config.toml")
-	if opts.Sandbox {
-		return newSandboxWithProfile(opts, vibeProfile()), nil
-	}
-	return Vibe{configPath: configPath, args: opts.Args}, nil
+	return Vibe{configPath: filepath.Join(vibeHome, "config.toml"), args: opts.Args}, nil
 }
 
 // vibeProfile is the sandbox side of the harness. Unlike opencode's, its
@@ -55,12 +54,11 @@ func vibeProfile() sandboxProfile {
 		needsModelServer:    true,
 		usesGeneratedConfig: true,
 		mistralEnv:          "MISTRAL_API_KEY",
-		stageConfigHome:     true,
 		configInHome:        "config.toml",
 		skillsConfigHome:    containerVibeHome,
 		skillsRelDir:        "skills",
 		renderConfig: func(_ *Sandbox, _, _ string, baseURL string, modelIDs []string) ([]byte, error) {
-			return vibeconfig.Render(baseURL, modelIDs), nil
+			return vibeconfig.Render(baseURL, modelIDs)
 		},
 		setModel: func(raw []byte, _, modelID string) ([]byte, error) {
 			return vibeconfig.SetModel(raw, modelID)
@@ -91,13 +89,15 @@ func (v Vibe) Configure(providerKey, baseURL string, modelIDs []string) error {
 
 func (v Vibe) Run(dir, providerKey, modelID string) error {
 	// The interactive TUI takes no model flag (--model is headless-only), and
-	// rewriting the user's active_model would outlive the session. So on the
-	// host the session starts on whatever model Vibe would pick anyway, and
-	// the llama-server models are one /model selection away. providerKey and
-	// modelID are only used by the sandbox, which writes them into its
+	// rewriting the user's active_model would outlive the session. Vibe's
+	// environment layer outranks config.toml, so VIBE_ACTIVE_MODEL pins the
+	// session's model without touching the file. Without it the session would
+	// start on Vibe's own default, a cloud model, while rnes serves a local
+	// one. providerKey is only used by the sandbox, which writes it into its
 	// session-local config.
 	cmd := exec.Command("vibe", v.args...)
 	cmd.Dir = dir
+	cmd.Env = withEnv(os.Environ(), "VIBE_ACTIVE_MODEL", modelID)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -144,7 +144,8 @@ and points the agent at it via that agent's own config env var
 (`OPENCODE_CONFIG` for opencode), so it works even if the agent's normal
 config resolution would otherwise pick something else up. For vibe, rnes
 replaces a marked block at the end of `config.toml` and leaves the rest of the
-file, including your `active_model`, untouched. `agy` runs only in the sandbox
+file, including your `active_model`, untouched (the session's model is pinned
+through `VIBE_ACTIVE_MODEL` instead). `agy` runs only in the sandbox
 and keeps its own state in a per-project Docker volume (see *Antigravity*
 below).
 
@@ -202,7 +203,7 @@ rnes -no-web    # don't expose the web UI (sandbox: no loopback forward)
 | Variable                  | Description |
 | ------------------------- | ----------- |
 | `RNES_GITHUB_TOKEN`       | GitHub token the sandbox's proxy injects for `git` and `gh` (requires `-sandbox`; see *GitHub credentials* below). Prefer a fine-grained token; to reuse your `gh` login, `export RNES_GITHUB_TOKEN=$(gh auth token)`. |
-| `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; ignored with `-harness agy`; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
+| `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; ignored with `-harness agy` or `-harness vibe`, which have no OpenRouter provider; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
 | `RNES_MISTRAL_API_KEY`    | Mistral API key the sandbox's proxy injects at `api.mistral.ai` (requires `-sandbox`; ignored with `-harness agy`; see *Mistral models* below). To reuse the key opencode stores, set with `export RNES_MISTRAL_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.mistral.key')`; a Vibe subscription key also works (on macOS, `export RNES_MISTRAL_API_KEY=$(security find-generic-password -s ai.mistral.vibe -a MISTRAL_API_KEY -w)` after browser sign-in; on Linux, copy the key from `https://chat.mistral.ai/code/extensions` (Advanced section)). |
 
 Those three variables are just the built-in cases: any `-sandbox` session can
@@ -548,13 +549,12 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
   literally named `all` can only be attached by path.
 - **Sources:** names and `all` are looked up, in this order, in each
   `-skills-dir` (in the order given), then the active harness's own global
-  skills folder first, followed by `~/.config/opencode/skills`,
-  `~/.gemini/config/skills`, `~/.vibe/skills`, `~/.agents/skills` and
-  `~/.claude/skills` (so under `-harness agy`, `~/.gemini/config/skills` comes
-  first and wins duplicate names for `all`; under `vibe`, `~/.vibe/skills`
-  does; under `opencode`, its own folder does). Each
-  folder's immediate
-  subdirectories are its skills. Default folders that don't exist are skipped;
+  skills folder, then the other harnesses' folders in this order:
+  `~/.config/opencode/skills`, `~/.gemini/config/skills`, `~/.vibe/skills`,
+  `~/.agents/skills`, `~/.claude/skills`. So under `-harness agy`,
+  `~/.gemini/config/skills` comes first and wins duplicate names for `all`;
+  under `vibe`, `~/.vibe/skills` does; under `opencode`, its own folder does.
+  Each folder's immediate subdirectories are its skills. Default folders that don't exist are skipped;
   a `-skills-dir` that doesn't exist is an error. `-skills-dir` on its own
   attaches nothing.
 - **Conflicts:**
@@ -719,15 +719,21 @@ api_key_env_var = ""
 name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 provider = "rnes-llamacpp"
 alias = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
+
 # <<< rnes
 ```
 
-Everything outside the block is left byte for byte, including comments, and
-your `active_model` is never rewritten: the session starts on whatever model
-Vibe would pick anyway, and the llama-server models are one `/model` selection
-away. (Vibe's `--model` is headless-only, so rnes can't force the model in the
-interactive TUI.) The provider is named `rnes-llamacpp` rather than
-`llamacpp` so it never shadows a local provider of your own.
+Everything outside the block is preserved, including comments; rnes keeps the
+block last in the file and normalises the blank lines around it. Your
+`active_model` is never rewritten: the session's model is pinned through
+`VIBE_ACTIVE_MODEL`, which Vibe's environment layer ranks above `config.toml`,
+so nothing outlives the session. (Vibe's `--model` is headless-only, so it
+can't do this in the interactive TUI.) The provider is named `rnes-llamacpp`
+rather than `llamacpp` so it never shadows a local provider of your own.
+
+rnes refuses to touch a `config.toml` it can't parse, rather than appending to
+a file Vibe itself would reject, and it writes through a symlink instead of
+replacing it, so a dotfiles-managed config stays managed.
 
 **In the sandbox** rnes generates the whole `config.toml` instead, from
 scratch, and puts it in a staged `~/.vibe` that is removed when the session
@@ -740,18 +746,31 @@ ends:
   `extra_headers`), and none of them may reach the container. The trade-off is
   that your own providers, models and MCP servers are not available in a vibe
   sandbox session.
-- `enable_telemetry`, `enable_update_checks` and `enable_auto_update` are off:
-  the sandbox's egress is allow-listed and audited, and none of the three is
-  needed to do the work.
+- `enable_telemetry`, `enable_update_checks`, `enable_auto_update`,
+  `enable_connectors` and `[experiments] enable` are off: the sandbox's egress
+  is allow-listed and audited, and none of them is needed to do the work.
+  Connectors matter most: with `RNES_MISTRAL_API_KEY` set, they would otherwise
+  hand the agent your own Mistral connectors (Drive, GitHub, Linear, Slack).
+  Vibe merges this file over its built-in defaults and a project
+  `.vibe/config.toml` can still override these switches, so the proxy, not the
+  config, is what actually bounds the session.
 - Vibe is started with `--trust`, so it doesn't stop at its trust prompt for
   the mounted workspace (the staged home has no trust database). The project's
-  own `.vibe/config.toml` and `.vibe/hooks.toml` then load, inside the
-  sandbox.
+  own `.vibe/config.toml` and `.vibe/hooks.toml` then load, inside the sandbox,
+  and its hooks run without an approval prompt: only open a vibe sandbox
+  session in a repository whose hooks you trust.
 - With `RNES_MISTRAL_API_KEY` set, the proxy injects the key at
   `api.mistral.ai` and the container only ever holds a placeholder, which
   Vibe's built-in Mistral provider reads from `MISTRAL_API_KEY`. Mistral models
   are then selectable with `/model`, and prompts leave your machine when you
   pick one.
+- Signing in to Mistral from inside the sandbox is not supported: the
+  sign-in flow needs `console.mistral.ai` and a loopback callback the container
+  can't reach. Use `RNES_MISTRAL_API_KEY` instead.
+- With a Mistral key present, Vibe also calls its console host
+  (`chat.mistral.ai`) for account and usage data. The proxy blocks it, so the
+  session ends with a `proxy blocked: chat.mistral.ai:443` line; nothing in the
+  session depends on it.
 - Nothing persists between sessions: Vibe's logs, history and any sign-in done
   inside the sandbox live in the staged home and are deleted with it. There is
   no auth volume, unlike `agy`.

@@ -179,6 +179,55 @@ func TestVibeSandboxRunStagesTheHomeEvenWithoutSkills(t *testing.T) {
 	}
 }
 
+// The container must start with a config.toml that already pins the session's
+// model: Run applies the model before staging the home.
+func TestVibeSandboxRunStartsWithTheSessionModelInTheStagedConfig(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "config.toml")
+	// A docker that copies the staged config out of the mount it is given,
+	// which is the file the container would read.
+	script := "#!/bin/sh\n" +
+		"[ \"$1\" = logs ] && { echo 'rnes-proxy: listening on [::]:8888'; exit 0; }\n" +
+		"for a in \"$@\"; do\n" +
+		"  case \"$a\" in\n" +
+		"    type=bind,source=*,target=/home/rnes/.vibe)\n" +
+		"      src=${a#type=bind,source=}; src=${src%%,target=*}\n" +
+		"      cp \"$src/config.toml\" " + snapshot + " 2>/dev/null ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMPDIR", t.TempDir())
+
+	h, err := New("vibe", Options{Sandbox: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := h.(*Sandbox)
+	s.image, s.proxyImage = "rnes-sandbox-default:vibetest", "rnes-sandbox-proxy:test"
+	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m-one", "m-two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Run(t.TempDir(), "llama-cpp", "m-two"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	raw, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatalf("the container was not given a config.toml: %v", err)
+	}
+	got := string(raw)
+	if !strings.Contains(got, `active_model = "m-two"`) {
+		t.Errorf("the container's config.toml does not start on the session's model:\n%s", got)
+	}
+	if !strings.Contains(got, `name = "rnes-llamacpp"`) {
+		t.Errorf("the container's config.toml has no local provider:\n%s", got)
+	}
+}
+
 func TestVibeWriteConfigInHomePutsTheGeneratedConfigWhereVibeReadsIt(t *testing.T) {
 	s := newSandboxWithProfile(Options{Sandbox: true}, vibeProfile())
 	if err := s.Configure("llama-cpp", "http://127.0.0.1:8080", []string{"m-one"}); err != nil {
@@ -186,6 +235,11 @@ func TestVibeWriteConfigInHomePutsTheGeneratedConfigWhereVibeReadsIt(t *testing.
 	}
 	t.Cleanup(func() { os.Remove(s.generated) })
 
+	// Run applies the model before staging the home, so the file it writes
+	// carries the session's model.
+	if err := s.applyModel("llama-cpp", "m-two"); err != nil {
+		t.Fatalf("applyModel: %v", err)
+	}
 	home := t.TempDir()
 	if err := s.writeConfigInHome(home); err != nil {
 		t.Fatalf("writeConfigInHome: %v", err)
@@ -196,6 +250,9 @@ func TestVibeWriteConfigInHomePutsTheGeneratedConfigWhereVibeReadsIt(t *testing.
 	}
 	if !strings.Contains(string(raw), `name = "rnes-llamacpp"`) {
 		t.Errorf("staged config.toml is not the generated one:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `active_model = "m-two"`) {
+		t.Errorf("staged config.toml does not start on the session's model:\n%s", raw)
 	}
 }
 
@@ -224,8 +281,8 @@ func TestVibeHostConfigureMergesIntoTheVibeHomeConfig(t *testing.T) {
 	if !strings.HasPrefix(got, original) {
 		t.Errorf("the user's own settings were not preserved:\n%s", got)
 	}
-	// On the host the session keeps the user's model: the local one is one
-	// /model selection away.
+	// On the host the session keeps the user's model in config.toml: the
+	// session's own model is pinned through VIBE_ACTIVE_MODEL instead.
 	if !strings.Contains(got, `active_model = "mine"`) {
 		t.Errorf("Configure rewrote the user's active_model:\n%s", got)
 	}
@@ -237,7 +294,11 @@ func TestVibeHostConfigureMergesIntoTheVibeHomeConfig(t *testing.T) {
 func TestVibeHostRunForwardsArgsAndRunsInTheProject(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "vibe.log")
-	script := "#!/bin/sh\necho \"$*\" >> " + logPath + "\npwd >> " + logPath + "\n"
+	modelPath := filepath.Join(dir, "model")
+	// The session's model rides in VIBE_ACTIVE_MODEL: the TUI takes no model
+	// flag, and rewriting the user's active_model would outlive the session.
+	script := "#!/bin/sh\necho \"$*\" >> " + logPath + "\npwd >> " + logPath + "\n" +
+		"[ \"$1\" = --version ] || echo \"$VIBE_ACTIVE_MODEL\" > " + modelPath + "\n"
 	bin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -276,6 +337,16 @@ func TestVibeHostRunForwardsArgsAndRunsInTheProject(t *testing.T) {
 	}
 	if real, _ := filepath.EvalSymlinks(project); lines[3] != project && lines[3] != real {
 		t.Errorf("vibe ran in %q, want the project %q", lines[3], project)
+	}
+
+	// Without this the session would start on Vibe's own default, a cloud
+	// model, while rnes serves a local one.
+	model, err := os.ReadFile(modelPath)
+	if err != nil {
+		t.Fatalf("the session's model was not passed to vibe: %v", err)
+	}
+	if got := strings.TrimSpace(string(model)); got != "m-one" {
+		t.Errorf("VIBE_ACTIVE_MODEL = %q, want m-one", got)
 	}
 }
 

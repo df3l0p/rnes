@@ -81,12 +81,10 @@ type sandboxProfile struct {
 	renderConfig func(s *Sandbox, hostConfig, providerKey, baseURL string, modelIDs []string) ([]byte, error)
 	// setModel makes the generated config start on providerKey/modelID.
 	setModel func(raw []byte, providerKey, modelID string) ([]byte, error)
-	// stageConfigHome stages the skills config home even when no skills are
-	// attached, so the generated config can live inside it (configInHome).
-	stageConfigHome bool
 	// configInHome names the generated config file inside the staged config
 	// home (e.g. "config.toml"); empty mounts it at containerConfigPath
-	// instead.
+	// instead. A harness that sets it gets the home staged even with no
+	// skills attached, since the config lives inside it.
 	configInHome string
 	// openRouterEnv is the container env var set to openrouterPlaceholder when
 	// the RNES_OPENROUTER_API_KEY secret is active (e.g. "OPENROUTER_API_KEY"
@@ -465,6 +463,9 @@ func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) erro
 	if !s.profile.usesGeneratedConfig {
 		return nil
 	}
+	if s.profile.renderConfig == nil {
+		return fmt.Errorf("harness %s: no config renderer", s.profile.harness)
+	}
 	containerURL, err := containerBaseURL(baseURL)
 	if err != nil {
 		return err
@@ -540,7 +541,7 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	if s.profile.generateSkillCommands {
 		commands = s.skillCommandNames(dir)
 	}
-	if len(s.skills) > 0 || len(commands) > 0 || s.profile.stageConfigHome {
+	if len(s.skills) > 0 || len(commands) > 0 || s.profile.configInHome != "" {
 		home, err := stageSkillsHome(s.profile.skillsRelDir, s.skills)
 		if err != nil {
 			return err
@@ -703,6 +704,9 @@ func (s *Sandbox) exposeWeb(hostPort int, linkPath string) {
 // generated config's default. The config is session-local and mounted
 // read-only into the container, so nothing outlives the session.
 func (s *Sandbox) applyModel(providerKey, modelID string) error {
+	if s.profile.setModel == nil {
+		return fmt.Errorf("harness %s: no model setter", s.profile.harness)
+	}
 	raw, err := os.ReadFile(s.generated)
 	if err != nil {
 		return fmt.Errorf("reading generated config: %w", err)

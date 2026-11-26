@@ -467,6 +467,34 @@ func TestSandboxRunRequiresConfigure(t *testing.T) {
 	}
 }
 
+// A profile that claims a generated config but supplies no renderer would
+// otherwise panic on a nil call.
+func TestSandboxConfigureRejectsAProfileWithoutARenderer(t *testing.T) {
+	s := newSandboxWithProfile(Options{Sandbox: true}, sandboxProfile{
+		harness:             "broken",
+		usesGeneratedConfig: true,
+	})
+	err := s.Configure("p", "http://127.0.0.1:8080", []string{"m"})
+	if err == nil || !strings.Contains(err.Error(), "no config renderer") {
+		t.Fatalf("Configure error = %v, want one naming the missing renderer", err)
+	}
+}
+
+func TestSandboxApplyModelRejectsAProfileWithoutASetter(t *testing.T) {
+	s := newSandboxWithProfile(Options{Sandbox: true}, sandboxProfile{
+		harness:             "broken",
+		usesGeneratedConfig: true,
+	})
+	s.generated = filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(s.generated, []byte("a = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := s.applyModel("p", "m")
+	if err == nil || !strings.Contains(err.Error(), "no model setter") {
+		t.Fatalf("applyModel error = %v, want one naming the missing setter", err)
+	}
+}
+
 func TestSandboxRunRequiresPrepare(t *testing.T) {
 	logPath := fakeDocker(t, nil)
 	s := newSandbox(Options{Sandbox: true}, filepath.Join(t.TempDir(), "absent.jsonc"))
@@ -1074,6 +1102,30 @@ func TestRemoveStagedHomeRemovesReadOnlyDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(inner, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(inner, 0o700) })
+
+	if err := removeStagedHome(dir); err != nil {
+		t.Fatalf("removeStagedHome: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the staged home survived removal, stat err = %v", err)
+	}
+}
+
+// A directory with no read permission can't be listed, so the walk has to
+// restore the permission before descending into it.
+func TestRemoveStagedHomeRemovesUnreadableDirectories(t *testing.T) {
+	dir := t.TempDir()
+	inner := filepath.Join(dir, "logs", "session")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inner, "session.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(inner, 0o300); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(inner, 0o700) })

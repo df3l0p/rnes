@@ -195,7 +195,7 @@ func TestOpenRouterKeyFromEnvReadsAndUnsets(t *testing.T) {
 }
 
 func TestValidateRejectsAnOpenRouterKeyWithNoInspect(t *testing.T) {
-	err := cliConfig{sandbox: true, noInspect: true, openrouterKey: "sk-or-x"}.validate()
+	err := cliConfig{sandbox: true, harness: "opencode", noInspect: true, openrouterKey: "sk-or-x"}.validate()
 	if err == nil || !strings.Contains(err.Error(), "RNES_OPENROUTER_API_KEY") {
 		t.Errorf("err = %v", err)
 	}
@@ -226,20 +226,23 @@ func TestValidateRejectsAnUnusableMistralKey(t *testing.T) {
 }
 
 func TestValidateRejectsAnUnusableOpenRouterKey(t *testing.T) {
-	err := cliConfig{sandbox: true, openrouterKey: "sk-or-x\n"}.validate()
+	err := cliConfig{sandbox: true, harness: "opencode", openrouterKey: "sk-or-x\n"}.validate()
 	if err == nil || !strings.Contains(err.Error(), "RNES_OPENROUTER_API_KEY") || strings.Contains(err.Error(), "sk-or-x") {
 		t.Errorf("err = %v, want one naming RNES_OPENROUTER_API_KEY and not echoing it", err)
 	}
 }
 
-func TestValidateIgnoresTheOpenRouterKeyForACloudHarness(t *testing.T) {
-	// agy never uses the OpenRouter provider, so even an unusable key or one
+func TestValidateIgnoresTheOpenRouterKeyForAHarnessWithoutOne(t *testing.T) {
+	// agy and vibe have no OpenRouter provider, so even an unusable key or one
 	// combined with -no-inspect must not block the session (it is dropped with
 	// a note at startup).
 	for _, cfg := range []cliConfig{
 		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x"},
 		{sandbox: true, harness: "agy", noInspect: true, openrouterKey: "sk-or-x"},
 		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x\n"},
+		{sandbox: true, harness: "vibe", openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "vibe", noInspect: true, openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "vibe", openrouterKey: "sk-or-x\n"},
 	} {
 		if err := cfg.validate(); err != nil {
 			t.Errorf("validate(%+v) = %v, want nil", cfg, err)

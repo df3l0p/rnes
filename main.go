@@ -123,7 +123,7 @@ func (c cliConfig) validate() error {
 			return fmt.Errorf("RNES_GITHUB_TOKEN is set, but -no-inspect stops the proxy from decrypting HTTPS, so it couldn't inject the token; unset one of them")
 		}
 	}
-	if c.openrouterKey != "" && !c.ignoresCloudKeys() {
+	if c.openrouterKey != "" && !c.ignoresCloudKeys() && c.usesOpenRouter() {
 		if err := proxy.ValidateToken(c.openrouterKey); err != nil {
 			return fmt.Errorf("RNES_OPENROUTER_API_KEY is unusable: %w", err)
 		}
@@ -152,6 +152,14 @@ func (c cliConfig) ignoresCloudKeys() bool {
 	}
 	needsModelServer, err := harness.NeedsModelServerName(c.harness)
 	return err == nil && !needsModelServer
+}
+
+// usesOpenRouter reports whether the selected harness has an OpenRouter
+// provider for the proxy to inject RNES_OPENROUTER_API_KEY into. Only opencode
+// ships one; agy and vibe have none, so the key is dropped with a note (see
+// newSession) rather than validated and carried into the sandbox unused.
+func (c cliConfig) usesOpenRouter() bool {
+	return c.harness == "opencode"
 }
 
 // checkTrailingArgs rejects positional arguments that aren't behind the "--"
@@ -183,13 +191,15 @@ func newSession(cfg cliConfig, home, cwd string, stderr io.Writer) (cliConfig, h
 		if err := checkModelServerFlags(cfg, needsModelServer); err != nil {
 			return cfg, nil, nil, err
 		}
-		if !needsModelServer && cfg.openrouterKey != "" {
-			fmt.Fprintf(stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
-			cfg.openrouterKey = ""
-		}
 		if !needsModelServer && cfg.mistralKey != "" {
 			fmt.Fprintf(stderr, "rnes: note: RNES_MISTRAL_API_KEY is ignored with -harness %s\n", cfg.harness)
 			cfg.mistralKey = ""
+		}
+		// Only opencode has an OpenRouter provider, so for any other harness
+		// the key would sit in the sandbox unused.
+		if !cfg.usesOpenRouter() && cfg.openrouterKey != "" {
+			fmt.Fprintf(stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
+			cfg.openrouterKey = ""
 		}
 	}
 	attached, err := resolveSkills(cfg, home, cwd, stderr)
@@ -306,7 +316,8 @@ Environment:
                         export RNES_GITHUB_TOKEN=$(gh auth token)
   RNES_OPENROUTER_API_KEY
                       OpenRouter API key the sandbox's proxy injects at openrouter.ai
-                      (requires -sandbox; ignored with -harness agy). The sandbox only
+                      (requires -sandbox; ignored with -harness agy or -harness vibe,
+                      which have no OpenRouter provider). The sandbox only
                       ever holds a placeholder, but an agent in it can still make
                       OpenRouter calls, so use a dedicated key with a low credit limit.
                       To reuse the key opencode stores instead (shared with whatever
@@ -541,7 +552,7 @@ func listenHost(h harness.Harness, host string, hostSet bool) (string, error) {
 
 func parseFlags() (cliConfig, error) {
 	var cfg cliConfig
-	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given; with -harness vibe, the sandbox session starts on it (on the host, pick it via /model)")
+	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given; with -harness vibe, the session starts on it on the host and in the sandbox")
 	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux; rejected for harnesses that don't use llama-server)")
 	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
 	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")
