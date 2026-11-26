@@ -7,7 +7,8 @@ it, and launches the agent in the current directory.
 It can also run a harness that uses its own cloud backend instead of a local
 model: `rnes -sandbox -harness agy` starts the Google Antigravity CLI (`agy`)
 against your Google subscription, with no `llama-server` involved (see
-*Antigravity* below).
+*Antigravity* below). `-harness vibe` runs the Mistral Vibe CLI against the
+local model, on the host or in the sandbox (see *Vibe* below).
 
 Concretely, running `rnes` in a project:
 
@@ -29,8 +30,10 @@ its own provider, and only the sandbox's egress proxy runs alongside it.
 ## Requirements
 
 - [opencode](https://opencode.ai) v2 on `PATH` for the default `opencode`
-  harness. [`agy`](https://antigravity.google) is installed inside its sandbox
-  image, so it needs only `docker` on the host.
+  harness, and [Vibe](https://github.com/mistralai/mistral-vibe) on `PATH` for
+  `-harness vibe` on the host (`uv tool install mistral-vibe`).
+  [`agy`](https://antigravity.google) and Vibe are installed inside their
+  sandbox images, so a sandbox session needs only `docker` on the host.
 - llama.cpp on `PATH` for harnesses that use a local model: either the unified
   `llama` CLI (`llama serve`) or the older standalone `llama-server` binary. On
   macOS, `brew install llama.cpp` provides both. Not needed for
@@ -66,10 +69,10 @@ the session's generated config so it starts on it.
 
 | Flag        | Default                                          | Description                                     |
 |-------------|---------------------------------------------------|--------------------------------------------------|
-| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; only a sandbox session starts on it — on the host, pick it via `/models`. With `-harness agy`, forwarded as `--model` only when given |
+| `-model`    | `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M`             | Model to serve; only a sandbox session starts on it — on the host, pick it via `/models` (opencode) or `/model` (vibe). With `-harness agy`, forwarded as `--model` only when given |
 | `-host`     | `127.0.0.1`                                       | llama-server host (with `-sandbox`, the narrowest address containers can reach; see below); rejected for harnesses that don't use llama-server |
 | `-port`     | `8080`                                            | llama-server port; rejected for harnesses that don't use llama-server |
-| `-harness`  | `opencode`                                        | Coding agent to run: `opencode` or `agy` (see *Antigravity* below) |
+| `-harness`  | `opencode`                                        | Coding agent to run: `opencode`, `agy` (see *Antigravity* below) or `vibe` (see *Vibe* below) |
 | `-sandbox`  | off                                               | Run the agent in a Docker container (see below)  |
 | `-worktree` | none                                              | Create (or reuse) the linked git worktree `<repository>/.worktree/<name>` and run the session there; works on the host and with `-sandbox` (see *Worktrees* below) |
 | `-image`    | `default`                                         | Bundled sandbox image to use (see below; requires `-sandbox`) |
@@ -133,13 +136,17 @@ worktree created by an older rnes still has a Docker Desktop for Mac
 `chmod -N .worktree/<name>/.rnes`; new sessions don't create that ACL.
 
 Each harness owns its own config path internally (opencode's is its default
-global config, `~/.config/opencode/opencode.jsonc`) — there's no flag for it.
+global config, `~/.config/opencode/opencode.jsonc`; vibe's is
+`$VIBE_HOME/config.toml`, `~/.vibe/config.toml` by default) — there's no flag
+for it.
 `rnes` merges into that file without touching any other keys already there,
 and points the agent at it via that agent's own config env var
 (`OPENCODE_CONFIG` for opencode), so it works even if the agent's normal
-config resolution would otherwise pick something else up. `agy` runs only in
-the sandbox and keeps its own state in a per-project Docker volume (see
-*Antigravity* below).
+config resolution would otherwise pick something else up. For vibe, rnes
+replaces a marked block at the end of `config.toml` and leaves the rest of the
+file, including your `active_model`, untouched. `agy` runs only in the sandbox
+and keeps its own state in a per-project Docker volume (see *Antigravity*
+below).
 
 ### Web UI and diff review
 
@@ -236,15 +243,21 @@ ownership".
 - **Config:** for the `opencode` harness, `rnes` generates a private copy of
   your opencode config with the `llama-cpp` provider's `baseURL` rewritten for
   the container and mounts it read-only. Your real config is not modified.
-  `agy` has no generated config; it keeps its own state in a per-project
-  volume (see *Antigravity* below).
+  For `vibe` it generates a `config.toml` from scratch instead — the local
+  provider, one model per served model, and the session's model as the
+  default — and puts it in a staged `~/.vibe` that is removed when the session
+  ends. Nothing is copied from your own `config.toml`, so no credential it
+  holds (an MCP server's static header, a provider's `extra_headers`) reaches
+  the container; the cost is that your own providers, models and MCP servers
+  are not available in a vibe sandbox session. `agy` has no generated config;
+  it keeps its own state in a per-project volume (see *Antigravity* below).
 - **Images:** `-image <name>` selects one of the images bundled in
   [`images/`](images), each a `<name>.Dockerfile`. The default, `default`,
   adds `jq`, `ripgrep`, `curl` and `gh` on top of the selected harness's base
-  (opencode for `-harness opencode`, agy for `-harness agy`). Every image is a
-  layer on an internal per-harness base image (`base-opencode`, `base-agy`;
-  each installs its agent, git and the non-root user) that isn't selectable
-  itself.
+  (opencode for `-harness opencode`, agy for `-harness agy`, vibe for
+  `-harness vibe`). Every image is a layer on an internal per-harness base
+  image (`base-opencode`, `base-agy`, `base-vibe`; each installs its agent,
+  git and the non-root user) that isn't selectable itself.
   `rnes` never pulls a sandbox image from a registry: a missing image is built
   from its Dockerfile (a build failure is an error). `-build` rebuilds the
   images from scratch, ignoring docker's layer cache, so it also picks up new
@@ -269,9 +282,11 @@ ownership".
   - **Adding a harness:** add `images/base-<harness>.Dockerfile` (standalone,
     ending as `USER rnes` with the agent as `ENTRYPOINT`), then register the
     harness in `internal/harness` as a `sandboxProfile`. The profile supplies
-    the image/base name, whether it needs a llama-server, any extra policy and
-    its argument list; the rest (proxy, credentials, skills, `.rnes` policy
-    protection) is shared.
+    the image/base name, whether it needs a llama-server, any extra policy, its
+    argument list, and — for an agent that needs a config file — how to render
+    it and where it lives (opencode's is mounted at a fixed path, vibe's is
+    written into the staged home); the rest (proxy, credentials, skills,
+    `.rnes` policy protection) is shared.
 - **Parallel sessions:** each session gets a uniquely named container, and
   any number can share one host llama-server (same lifecycle rules as above).
 - **Network exposure:** `rnes` never listens on all interfaces by default. With
@@ -534,9 +549,10 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
 - **Sources:** names and `all` are looked up, in this order, in each
   `-skills-dir` (in the order given), then the active harness's own global
   skills folder first, followed by `~/.config/opencode/skills`,
-  `~/.gemini/config/skills`, `~/.agents/skills` and `~/.claude/skills` (so
-  under `-harness agy`, `~/.gemini/config/skills` comes first and wins
-  duplicate names for `all`; under `opencode`, its own folder does). Each
+  `~/.gemini/config/skills`, `~/.vibe/skills`, `~/.agents/skills` and
+  `~/.claude/skills` (so under `-harness agy`, `~/.gemini/config/skills` comes
+  first and wins duplicate names for `all`; under `vibe`, `~/.vibe/skills`
+  does; under `opencode`, its own folder does). Each
   folder's immediate
   subdirectories are its skills. Default folders that don't exist are skipped;
   a `-skills-dir` that doesn't exist is an error. `-skills-dir` on its own
@@ -553,17 +569,20 @@ rnes -sandbox -skills-dir ~/team-skills -skill deploy
     an error.
   - An unknown name is an error naming the folders searched.
   - If the project already has a skill of the same name in `.opencode/skills`,
-    `.opencode/skill`, `.agent/skills`, `.claude/skills` or `.agents/skills`,
-    `rnes` warns; which one the active harness uses is up to it.
+    `.opencode/skill`, `.agent/skills`, `.vibe/skills`, `.claude/skills` or
+    `.agents/skills`, `rnes` warns; which one the active harness uses is up to
+    it.
 - **Validation:** a skill is a directory with a `SKILL.md` (a regular file
   inside it), whose folder name is a valid skill name. An explicitly requested
   skill that isn't valid is an error; under `all`, invalid entries are skipped
   with a warning (plain files and hidden entries such as `.git` are ignored).
 - **In the sandbox:** each attached skill's directory is bind-mounted
   read-only where the active harness finds global skills:
-  `~/.config/opencode/skills/<name>` for opencode, and
+  `~/.config/opencode/skills/<name>` for opencode,
   `~/.gemini/config/skills/<name>` for agy (a sibling of its auth volume,
-  never inside it). They are live (edits on the host show up in the session),
+  never inside it), and `~/.vibe/skills/<name>` for vibe (in the same staged
+  home as its generated config). They are live (edits on the host show up in
+  the session),
   and nothing else from your skills folders or home directory is visible. A
   symlink inside a skill that points outside its directory is dangling in the
   container. So that docker doesn't create the mount point's parents
@@ -678,13 +697,78 @@ endpoints are added on top of it. If that leaves no host to intercept, the
 proxy writes the system roots alone to the sandbox's trust bundle, so real
 upstream certificates still validate.
 
+### Vibe (`-harness vibe`)
+
+`rnes -harness vibe` runs the [Mistral Vibe CLI](https://github.com/mistralai/mistral-vibe)
+against the local model, and `rnes -sandbox -harness vibe` runs it inside the
+same sandbox as the other harnesses. Both need `llama-server`; `-host` and
+`-port` apply as usual.
+
+**On the host** rnes merges a provider block into your own
+`$VIBE_HOME/config.toml` (`~/.vibe/config.toml` by default), between two
+markers it owns:
+
+```toml
+# >>> rnes: local llama-server (managed by rnes; edits here are overwritten)
+[[providers]]
+name = "rnes-llamacpp"
+api_base = "http://127.0.0.1:8080/v1"
+api_key_env_var = ""
+
+[[models]]
+name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
+provider = "rnes-llamacpp"
+alias = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
+# <<< rnes
+```
+
+Everything outside the block is left byte for byte, including comments, and
+your `active_model` is never rewritten: the session starts on whatever model
+Vibe would pick anyway, and the llama-server models are one `/model` selection
+away. (Vibe's `--model` is headless-only, so rnes can't force the model in the
+interactive TUI.) The provider is named `rnes-llamacpp` rather than
+`llamacpp` so it never shadows a local provider of your own.
+
+**In the sandbox** rnes generates the whole `config.toml` instead, from
+scratch, and puts it in a staged `~/.vibe` that is removed when the session
+ends:
+
+- The session starts on the model rnes serves (`-model`), and every cached
+  model is selectable.
+- Nothing is copied from your own `config.toml`. Vibe's config can hold
+  literal secrets (an MCP server's static header, a provider's
+  `extra_headers`), and none of them may reach the container. The trade-off is
+  that your own providers, models and MCP servers are not available in a vibe
+  sandbox session.
+- `enable_telemetry`, `enable_update_checks` and `enable_auto_update` are off:
+  the sandbox's egress is allow-listed and audited, and none of the three is
+  needed to do the work.
+- Vibe is started with `--trust`, so it doesn't stop at its trust prompt for
+  the mounted workspace (the staged home has no trust database). The project's
+  own `.vibe/config.toml` and `.vibe/hooks.toml` then load, inside the
+  sandbox.
+- With `RNES_MISTRAL_API_KEY` set, the proxy injects the key at
+  `api.mistral.ai` and the container only ever holds a placeholder, which
+  Vibe's built-in Mistral provider reads from `MISTRAL_API_KEY`. Mistral models
+  are then selectable with `/model`, and prompts leave your machine when you
+  pick one.
+- Nothing persists between sessions: Vibe's logs, history and any sign-in done
+  inside the sandbox live in the staged home and are deleted with it. There is
+  no auth volume, unlike `agy`.
+
+Attached skills (`-skill`) are mounted read-only at `~/.vibe/skills/<name>`,
+and `~/.vibe/skills` is searched first for `-skill` names under this harness.
+Arguments after `--` are forwarded to `vibe` (e.g.
+`rnes -sandbox -harness vibe -- --continue`).
+
 ## Notes
 
 - llama-server's own logs are written to
   `$TMPDIR/rnes-llama-server-<port>.log` rather than to the terminal, since
   the agent's full-screen UI shares the same tty and raw log output would
   corrupt it. The path is printed on startup.
-- Two harnesses are implemented today: `opencode` (host or sandbox) and
-  `agy` (sandbox only). Adding another means registering a `sandboxProfile`
-  in `internal/harness` (or implementing the small `Harness` interface for a
-  host-mode agent) and adding its `images/base-<name>.Dockerfile`.
+- Three harnesses are implemented today: `opencode` (host or sandbox),
+  `vibe` (host or sandbox) and `agy` (sandbox only). Adding another means
+  registering a `sandboxProfile` in `internal/harness` (or implementing the
+  small `Harness` interface for a host-mode agent) and adding its
+  `images/base-<name>.Dockerfile`.

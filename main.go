@@ -330,8 +330,8 @@ Environment:
                       (Advanced section):
                         export RNES_MISTRAL_API_KEY=<key>
                       Local llama stays the default; switch to a mistral model inside
-                      opencode. Prompts and code context leave your machine when you
-                      do.
+                      opencode (or, with -harness vibe, inside Vibe). Prompts and code
+                      context leave your machine when you do.
 
 .rnes/policy.yaml can inject any host environment variable into a header for an
 allow-listed host: key names the header, value names the variable, and an
@@ -541,7 +541,7 @@ func listenHost(h harness.Harness, host string, hostSet bool) (string, error) {
 
 func parseFlags() (cliConfig, error) {
 	var cfg cliConfig
-	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given")
+	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given; with -harness vibe, the sandbox session starts on it (on the host, pick it via /model)")
 	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux; rejected for harnesses that don't use llama-server)")
 	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
 	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")
@@ -556,7 +556,7 @@ func parseFlags() (cliConfig, error) {
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
 	flag.BoolVar(&cfg.web, "web", false, "open opencode's web UI for the session in your browser at startup (requires -harness opencode); the TUI keeps running and both share one live session")
 	flag.BoolVar(&cfg.noWeb, "no-web", false, "don't serve the session's web UI at all (with -sandbox it is exposed on a loopback port by default; on the host opencode's server always serves it, so this only saves the sandbox forward)")
-	flag.Var(&cfg.skills, "skill", "attach a host skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then the active harness's global skills folder, ~/.gemini/config/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
+	flag.Var(&cfg.skills, "skill", "attach a host skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then the active harness's global skills folder, ~/.gemini/config/skills, ~/.vibe/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
 	flag.Var(&cfg.skillsDirs, "skills-dir", "a host folder whose subdirectories are skills, searched before the default ones for -skill names and \"all\"; attaches nothing on its own; repeatable; requires -sandbox")
 	flag.Usage = func() { usage(os.Stderr) }
 	flag.Parse()

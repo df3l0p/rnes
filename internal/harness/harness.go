@@ -161,6 +161,7 @@ type registration struct {
 var registry = map[string]registration{
 	"agy":      {new: newAgy, needsModelServer: false},
 	"opencode": {new: newOpencode, needsModelServer: true},
+	"vibe":     {new: newVibe, needsModelServer: true},
 }
 
 // Names returns the registered harness names, sorted.

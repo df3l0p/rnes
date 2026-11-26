@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -19,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/df3l0p/rnes/images"
-	"github.com/df3l0p/rnes/internal/opencodeconfig"
 	"github.com/df3l0p/rnes/internal/proxy"
 	"github.com/df3l0p/rnes/internal/skills"
 	"github.com/df3l0p/rnes/internal/worktree"
@@ -68,11 +68,26 @@ type sandboxProfile struct {
 	// needsModelServer reports whether the session uses a local llama-server.
 	needsModelServer bool
 	// usesGeneratedConfig reports whether Configure writes a session-local
-	// config file that Run mounts into the container (opencode.jsonc).
+	// config file that Run mounts into the container (opencode.jsonc) or
+	// copies into the staged config home (vibe's config.toml).
 	usesGeneratedConfig bool
 	// hostConfig is the host config file path used by Configure when
-	// usesGeneratedConfig is true.
+	// usesGeneratedConfig is true and the harness reads one (opencode).
 	hostConfig string
+	// renderConfig builds the session-local config for a harness that uses
+	// one, from the host config at hostConfig (when the harness reads one)
+	// and the container-side provider URL. Required when usesGeneratedConfig
+	// is true.
+	renderConfig func(s *Sandbox, hostConfig, providerKey, baseURL string, modelIDs []string) ([]byte, error)
+	// setModel makes the generated config start on providerKey/modelID.
+	setModel func(raw []byte, providerKey, modelID string) ([]byte, error)
+	// stageConfigHome stages the skills config home even when no skills are
+	// attached, so the generated config can live inside it (configInHome).
+	stageConfigHome bool
+	// configInHome names the generated config file inside the staged config
+	// home (e.g. "config.toml"); empty mounts it at containerConfigPath
+	// instead.
+	configInHome string
 	// openRouterEnv is the container env var set to openrouterPlaceholder when
 	// the RNES_OPENROUTER_API_KEY secret is active (e.g. "OPENROUTER_API_KEY"
 	// for opencode).
@@ -442,9 +457,10 @@ func layerBuildArgs(tag, baseTag string) []string {
 	return []string{"build", "--build-arg", "RNES_BASE=" + baseTag, "-t", tag, "-"}
 }
 
-// Configure writes a copy of the host opencode config, with the provider
-// pointed at baseURL as seen from inside a container, to a private temp file.
-// For harnesses that don't use a generated config file, Configure is a no-op.
+// Configure writes the session-local config of a harness that uses one, with
+// the provider pointed at baseURL as seen from inside a container, to a
+// private temp file. For harnesses that don't use a generated config file,
+// Configure is a no-op.
 func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) error {
 	if !s.profile.usesGeneratedConfig {
 		return nil
@@ -456,53 +472,12 @@ func (s *Sandbox) Configure(providerKey, baseURL string, modelIDs []string) erro
 	if u, err := url.Parse(containerURL); err == nil {
 		s.modelServer = u.Host // already "host.docker.internal:<port>"
 	}
-	out, err := opencodeconfig.Render(s.hostConfig, providerKey, opencodeProvider(containerURL, modelIDs))
+	out, err := s.profile.renderConfig(s, s.hostConfig, providerKey, containerURL, modelIDs)
 	if err != nil {
 		return err
-	}
-	// A literal apiKey in any provider block must never reach the container:
-	// for the proxied providers (openrouter, mistral) it would override the
-	// placeholder and skip the proxy; for any other provider it would still
-	// leak the credential into the sandbox, usable whenever a project policy
-	// allow-lists its host. Strip them all, whatever the session's keys are.
-	// This covers only the copy of the global host config: project-level
-	// opencode configs inside the mounted workspace are the project's own
-	// files, readable by the agent like any other workspace file, and are
-	// loaded as-is.
-	out, dropped, err := opencodeconfig.DropProviderAPIKeys(out)
-	if err != nil {
-		return err
-	}
-	if len(dropped) > 0 {
-		// Only the proxied providers get their key back (the proxy injects
-		// it); every other dropped provider just loses access, so the
-		// warning must say which is which instead of claiming the proxy
-		// covers them all.
-		var proxied, lost []string
-		injected := map[string]string{}
-		for _, id := range dropped {
-			if env, ok := s.injectedFrom(cloudProviderHosts[id]); ok {
-				proxied = append(proxied, id)
-				injected[id] = env
-				continue
-			}
-			lost = append(lost, id)
-		}
-		fmt.Fprintf(os.Stderr, "rnes: warning: removed the apiKey of %s from the sandbox's copy of your opencode config so it never reaches the container", strings.Join(dropped, ", "))
-		if len(proxied) > 0 {
-			var from []string
-			for _, id := range proxied {
-				from = append(from, id+" (from "+injected[id]+")")
-			}
-			fmt.Fprintf(os.Stderr, "; the proxy injects its key for %s", strings.Join(from, ", "))
-		}
-		if len(lost) > 0 {
-			fmt.Fprintf(os.Stderr, "; %s models don't work in the sandbox without a key of their own", strings.Join(lost, ", "))
-		}
-		fmt.Fprintln(os.Stderr)
 	}
 	// CreateTemp creates the file 0600; the container runs as the same uid.
-	f, err := os.CreateTemp("", "rnes-sandbox-config-*.jsonc")
+	f, err := os.CreateTemp("", "rnes-sandbox-config-*")
 	if err != nil {
 		return fmt.Errorf("creating sandbox config: %w", err)
 	}
@@ -559,12 +534,13 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 	}
 
 	// Stage the skills parent directory when skills are attached (or, for
-	// opencode, when project skills get synthetic /<name> commands).
+	// opencode, when project skills get synthetic /<name> commands), and for
+	// a harness whose generated config lives inside it.
 	var commands []string
 	if s.profile.generateSkillCommands {
 		commands = s.skillCommandNames(dir)
 	}
-	if len(s.skills) > 0 || len(commands) > 0 {
+	if len(s.skills) > 0 || len(commands) > 0 || s.profile.stageConfigHome {
 		home, err := stageSkillsHome(s.profile.skillsRelDir, s.skills)
 		if err != nil {
 			return err
@@ -573,8 +549,14 @@ func (s *Sandbox) Run(dir, providerKey, modelID string) error {
 		if s.profile.generateSkillCommands {
 			s.writeSkillCommands(home, commands)
 		}
+		if s.profile.configInHome != "" {
+			if err := s.writeConfigInHome(home); err != nil {
+				removeStagedHome(home)
+				return err
+			}
+		}
 		defer func() {
-			if err := os.RemoveAll(home); err != nil {
+			if err := removeStagedHome(home); err != nil {
 				fmt.Fprintf(os.Stderr, "rnes: warning: couldn't remove the sandbox's skills staging directory %s: %v\n", home, err)
 			}
 		}()
@@ -718,14 +700,14 @@ func (s *Sandbox) exposeWeb(hostPort int, linkPath string) {
 
 // applyModel makes the session start on providerKey/modelID. The harness's
 // session UI may not accept a model flag, so the model rides in the
-// generated config's top-level "model" default. The config is session-local
-// and mounted read-only into the container, so nothing outlives the session.
+// generated config's default. The config is session-local and mounted
+// read-only into the container, so nothing outlives the session.
 func (s *Sandbox) applyModel(providerKey, modelID string) error {
 	raw, err := os.ReadFile(s.generated)
 	if err != nil {
 		return fmt.Errorf("reading generated config: %w", err)
 	}
-	raw, err = opencodeconfig.SetModel(raw, providerKey+"/"+modelID)
+	raw, err = s.profile.setModel(raw, providerKey, modelID)
 	if err != nil {
 		return fmt.Errorf("setting the sandbox's model: %w", err)
 	}
@@ -885,7 +867,7 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-e", "HOME=" + containerHome,
 	}
-	if s.profile.usesGeneratedConfig {
+	if s.profile.usesGeneratedConfig && s.profile.configInHome == "" {
 		args = append(args, "-e", "OPENCODE_CONFIG="+containerConfigPath)
 	}
 	args = append(args, "-v", dir+":"+containerWorkdir)
@@ -894,7 +876,7 @@ func (s *Sandbox) runArgsForModel(name, dir string, pn *proxyNet, tty bool, mode
 	// directory it names has to be in the container too. A normal checkout's
 	// .git is already under dir and needs nothing.
 	args = append(args, s.gitMounts(dir)...)
-	if s.profile.usesGeneratedConfig {
+	if s.profile.usesGeneratedConfig && s.profile.configInHome == "" {
 		args = append(args, "-v", s.generated+":"+containerConfigPath+":ro")
 	}
 	if vol := s.AuthVolume(dir); vol != "" && len(s.profile.authMountTargets) > 0 {
@@ -1177,6 +1159,41 @@ func (s *Sandbox) writeSkillCommands(home string, names []string) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "rnes: skill commands: /%s\n", strings.Join(names, ", /"))
+}
+
+// removeStagedHome removes a staged config home. A harness may leave
+// read-only directories in it (vibe keeps a read-only copy of every plugin it
+// loads), and removing a file needs write permission on its directory, so
+// every directory is made writable first. WalkDir doesn't follow symlinks, so
+// a link the harness left behind can't lead this outside the staged home.
+func removeStagedHome(dir string) error {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
+}
+
+// writeConfigInHome copies the generated config into the staged config home,
+// for a harness that reads it from its own home directory (vibe's
+// $VIBE_HOME/config.toml) rather than from a path rnes mounts. The staged
+// home is mounted at the harness's home, so the file lands where the harness
+// looks for it, and the whole home is removed when the session ends.
+func (s *Sandbox) writeConfigInHome(home string) error {
+	raw, err := os.ReadFile(s.generated)
+	if err != nil {
+		return fmt.Errorf("reading generated config: %w", err)
+	}
+	path := filepath.Join(home, s.profile.configInHome)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 // credentials is the line of credential config for rnes-proxy's stdin, or nil

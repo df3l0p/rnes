@@ -1061,6 +1061,31 @@ func TestSandboxRunStagesAWritableConfigHomeAndRemovesIt(t *testing.T) {
 	}
 }
 
+// TestRemoveStagedHomeRemovesReadOnlyDirectories covers what vibe leaves
+// behind: a read-only copy of every plugin it loads. Removing a file needs
+// write permission on its directory, so a plain RemoveAll fails there.
+func TestRemoveStagedHomeRemovesReadOnlyDirectories(t *testing.T) {
+	dir := t.TempDir()
+	inner := filepath.Join(dir, "logs", "session", "plugins", "packages", "e4", "pkg")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inner, "plugin.json"), []byte("{}"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(inner, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(inner, 0o700) })
+
+	if err := removeStagedHome(dir); err != nil {
+		t.Fatalf("removeStagedHome: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the staged home survived removal, stat err = %v", err)
+	}
+}
+
 func TestStageConfigHomeHasTheMountPointsAndIsTheUsers(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	dir, err := stageConfigHome([]skills.Skill{{Name: "foo"}, {Name: "bar"}})

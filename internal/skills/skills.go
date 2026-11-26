@@ -33,8 +33,9 @@ var namePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // projectDirs are where supported harnesses look for a project's own skills,
 // relative to the working directory. .opencode/skill is opencode's legacy
-// singular form; .agent/skills is agy's workspace skills directory.
-var projectDirs = []string{".opencode/skills", ".opencode/skill", ".agent/skills", ".claude/skills", ".agents/skills"}
+// singular form; .agent/skills is agy's workspace skills directory;
+// .vibe/skills is vibe's.
+var projectDirs = []string{".opencode/skills", ".opencode/skill", ".agent/skills", ".vibe/skills", ".claude/skills", ".agents/skills"}
 
 // opencodeProjectDirs are the subset of projectDirs that opencode itself reads
 // (used by DiscoverProject and DiscoverAll when generating opencode commands).
@@ -44,8 +45,11 @@ var opencodeProjectDirs = []string{".opencode/skills", ".opencode/skill", ".clau
 // the shadowing warning only ever names a directory the active harness
 // resolves; unknown harnesses default to opencode's.
 func projectDirsFor(harness string) []string {
-	if harness == "agy" {
+	switch harness {
+	case "agy":
 		return []string{".agent/skills"}
+	case "vibe":
+		return []string{".vibe/skills", ".agents/skills"}
 	}
 	return opencodeProjectDirs
 }
@@ -92,12 +96,16 @@ func DefaultSources(home string) []string {
 func DefaultSourcesFor(home, harness string) []string {
 	opencode := filepath.Join(home, ".config", "opencode", "skills")
 	agy := filepath.Join(home, ".gemini", "config", "skills")
+	vibe := filepath.Join(home, ".vibe", "skills")
 	agents := filepath.Join(home, ".agents", "skills")
 	claude := filepath.Join(home, ".claude", "skills")
-	if harness == "agy" {
-		return []string{agy, opencode, agents, claude}
+	switch harness {
+	case "agy":
+		return []string{agy, opencode, vibe, agents, claude}
+	case "vibe":
+		return []string{vibe, opencode, agy, agents, claude}
 	}
-	return []string{opencode, agy, agents, claude}
+	return []string{opencode, agy, vibe, agents, claude}
 }
 
 // ValidName reports whether name is a valid skill name.

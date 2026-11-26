@@ -50,6 +50,7 @@ func (e env) skill(dir, name string) string {
 
 func (e env) opencode() string { return filepath.Join(e.home, ".config", "opencode", "skills") }
 func (e env) agy() string      { return filepath.Join(e.home, ".gemini", "config", "skills") }
+func (e env) vibe() string     { return filepath.Join(e.home, ".vibe", "skills") }
 func (e env) agents() string   { return filepath.Join(e.home, ".agents", "skills") }
 func (e env) claude() string   { return filepath.Join(e.home, ".claude", "skills") }
 
@@ -91,6 +92,7 @@ func TestNameResolvesInSourceOrder(t *testing.T) {
 	}{
 		{"opencode", env.opencode},
 		{"agy", env.agy},
+		{"vibe", env.vibe},
 		{"agents", env.agents},
 		{"claude", env.claude},
 	} {
@@ -366,6 +368,7 @@ func TestProjectCollisionWarns(t *testing.T) {
 		{"opencode", ".opencode/skills"},
 		{"opencode", ".opencode/skill"},
 		{"agy", ".agent/skills"},
+		{"vibe", ".vibe/skills"},
 		{"opencode", ".claude/skills"},
 		{"opencode", ".agents/skills"},
 	} {
