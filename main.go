@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -77,6 +79,13 @@ type cliConfig struct {
 	openrouterKey string
 	// mistralKey is RNES_MISTRAL_API_KEY, handled like openrouterKey.
 	mistralKey string
+	// mistralKeyFromKeychain records that mistralKey came from the macOS
+	// Keychain rather than the environment, so the startup note can say where
+	// it came from.
+	mistralKeyFromKeychain bool
+	// noKeychain turns off reading the key Vibe's browser sign-in stored in the
+	// macOS Keychain for a sandboxed Vibe session.
+	noKeychain bool
 	// skills are the -skill values (names, paths or "all") and skillsDirs the
 	// -skills-dir folders, both in the order given.
 	skills     stringList
@@ -112,8 +121,8 @@ func (c cliConfig) validate() error {
 	if c.worktree != "" && c.sandboxUpdate {
 		return fmt.Errorf("-worktree and -sandbox-update cannot be used together")
 	}
-	if !c.sandbox && (c.image != "" || c.build || c.allowPublic || c.allowPrivate || c.noInspect || len(c.skills) > 0 || len(c.skillsDirs) > 0) {
-		return fmt.Errorf("-image, -build, -allow-public, -allow-private, -no-inspect, -skill and -skills-dir require -sandbox")
+	if !c.sandbox && (c.image != "" || c.build || c.allowPublic || c.allowPrivate || c.noInspect || c.noKeychain || len(c.skills) > 0 || len(c.skillsDirs) > 0) {
+		return fmt.Errorf("-image, -build, -allow-public, -allow-private, -no-inspect, -no-keychain, -skill and -skills-dir require -sandbox")
 	}
 	if c.githubToken != "" {
 		if err := proxy.ValidateToken(c.githubToken); err != nil {
@@ -123,7 +132,7 @@ func (c cliConfig) validate() error {
 			return fmt.Errorf("RNES_GITHUB_TOKEN is set, but -no-inspect stops the proxy from decrypting HTTPS, so it couldn't inject the token; unset one of them")
 		}
 	}
-	if c.openrouterKey != "" && !c.ignoresCloudKeys() {
+	if c.openrouterKey != "" && !c.ignoresCloudKeys() && c.usesOpenRouter() {
 		if err := proxy.ValidateToken(c.openrouterKey); err != nil {
 			return fmt.Errorf("RNES_OPENROUTER_API_KEY is unusable: %w", err)
 		}
@@ -152,6 +161,14 @@ func (c cliConfig) ignoresCloudKeys() bool {
 	}
 	needsModelServer, err := harness.NeedsModelServerName(c.harness)
 	return err == nil && !needsModelServer
+}
+
+// usesOpenRouter reports whether the selected harness has an OpenRouter
+// provider for the proxy to inject RNES_OPENROUTER_API_KEY into. Only opencode
+// ships one; agy and vibe have none, so the key is dropped with a note (see
+// newSession) rather than validated and carried into the sandbox unused.
+func (c cliConfig) usesOpenRouter() bool {
+	return c.harness == "opencode"
 }
 
 // checkTrailingArgs rejects positional arguments that aren't behind the "--"
@@ -183,13 +200,15 @@ func newSession(cfg cliConfig, home, cwd string, stderr io.Writer) (cliConfig, h
 		if err := checkModelServerFlags(cfg, needsModelServer); err != nil {
 			return cfg, nil, nil, err
 		}
-		if !needsModelServer && cfg.openrouterKey != "" {
-			fmt.Fprintf(stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
-			cfg.openrouterKey = ""
-		}
 		if !needsModelServer && cfg.mistralKey != "" {
 			fmt.Fprintf(stderr, "rnes: note: RNES_MISTRAL_API_KEY is ignored with -harness %s\n", cfg.harness)
 			cfg.mistralKey = ""
+		}
+		// Only opencode has an OpenRouter provider, so for any other harness
+		// the key would sit in the sandbox unused.
+		if !cfg.usesOpenRouter() && cfg.openrouterKey != "" {
+			fmt.Fprintf(stderr, "rnes: note: RNES_OPENROUTER_API_KEY is ignored with -harness %s\n", cfg.harness)
+			cfg.openrouterKey = ""
 		}
 	}
 	attached, err := resolveSkills(cfg, home, cwd, stderr)
@@ -306,7 +325,8 @@ Environment:
                         export RNES_GITHUB_TOKEN=$(gh auth token)
   RNES_OPENROUTER_API_KEY
                       OpenRouter API key the sandbox's proxy injects at openrouter.ai
-                      (requires -sandbox; ignored with -harness agy). The sandbox only
+                      (requires -sandbox; ignored with -harness agy or -harness vibe,
+                      which have no OpenRouter provider). The sandbox only
                       ever holds a placeholder, but an agent in it can still make
                       OpenRouter calls, so use a dedicated key with a low credit limit.
                       To reuse the key opencode stores instead (shared with whatever
@@ -326,12 +346,14 @@ Environment:
                       A Vibe subscription key also works (shared with your Vibe
                       usage), on macOS after browser sign-in:
                         export RNES_MISTRAL_API_KEY=$(security find-generic-password -s ai.mistral.vibe -a MISTRAL_API_KEY -w)
+                      With -harness vibe, rnes reads that macOS Keychain item itself,
+                      so a signed-in user needs no export; -no-keychain turns it off.
                       On Linux, copy the key from https://chat.mistral.ai/code/extensions
                       (Advanced section):
                         export RNES_MISTRAL_API_KEY=<key>
                       Local llama stays the default; switch to a mistral model inside
-                      opencode. Prompts and code context leave your machine when you
-                      do.
+                      opencode (or, with -harness vibe, inside Vibe). Prompts and code
+                      context leave your machine when you do.
 
 .rnes/policy.yaml can inject any host environment variable into a header for an
 allow-listed host: key names the header, value names the variable, and an
@@ -493,6 +515,45 @@ func mistralKeyFromEnv() string {
 	return key
 }
 
+// vibeKeychainKey reads the API key Vibe's browser sign-in stores in the macOS
+// Keychain (service ai.mistral.vibe, account MISTRAL_API_KEY). It returns ""
+// when the platform has no such store, Vibe isn't signed in, or the item can't
+// be read, so a session without one behaves exactly as before.
+func vibeKeychainKey() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	out, err := exec.Command("security", "find-generic-password", "-s", "ai.mistral.vibe", "-a", "MISTRAL_API_KEY", "-w").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// mistralKeyForSession resolves the Mistral key a session will use: an explicit
+// RNES_MISTRAL_API_KEY always wins, and a sandboxed Vibe session otherwise
+// falls back to the key Vibe's own browser sign-in stored in the macOS
+// Keychain, so a signed-in user gets their subscription without exporting
+// anything. The second result reports that fallback, for the startup note.
+//
+// Only Vibe reads that item: opencode has its own sign-in and its own key, and
+// agy has no Mistral provider at all. -no-inspect is excluded because the proxy
+// can't inject a credential it can't decrypt, and validate would then reject a
+// key the user never set.
+func (c cliConfig) mistralKeyForSession(envKey string, readKeychain func() string) (string, bool) {
+	if envKey != "" {
+		return envKey, false
+	}
+	if c.noKeychain || !c.sandbox || c.noInspect || c.generatePolicy || c.sandboxUpdate || c.harness != "vibe" {
+		return "", false
+	}
+	key := readKeychain()
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
 // activeProviders names the credential sources a session will use, for the
 // startup line.
 func activeProviders(c cliConfig) []string {
@@ -541,7 +602,7 @@ func listenHost(h harness.Harness, host string, hostSet bool) (string, error) {
 
 func parseFlags() (cliConfig, error) {
 	var cfg cliConfig
-	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given")
+	flag.StringVar(&cfg.model, "model", "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M", "model to use in the harness (downloaded if not cached); every cached model is made available; with -harness agy, forwarded as --model only when given; with -harness vibe, the session starts on it on the host and in the sandbox")
 	flag.StringVar(&cfg.host, "host", defaultHost, "llama-server host (with -sandbox and the default, the narrowest address containers can reach: the loopback on Docker Desktop, the docker bridge gateway on Linux; rejected for harnesses that don't use llama-server)")
 	flag.IntVar(&cfg.port, "port", 8080, "llama-server port (rejected for harnesses that don't use llama-server)")
 	flag.StringVar(&cfg.harness, "harness", "opencode", "coding agent harness to run (available: "+strings.Join(harness.Names(), ", ")+")")
@@ -554,9 +615,10 @@ func parseFlags() (cliConfig, error) {
 	flag.BoolVar(&cfg.allowPublic, "allow-public", false, "let the sandbox reach any public host over http(s), not just the allow-list (private addresses stay blocked apart from llama-server); requires -sandbox")
 	flag.BoolVar(&cfg.allowPrivate, "allow-private", false, "let the sandbox reach private addresses (RFC 1918 or IPv6 ULA) outside the allow-list; mark one entry 'private: true' in .rnes/policy.yaml to allow just that one; pair with -allow-public to allow both address types everywhere; loopback, link-local metadata and CGNAT stay blocked; requires -sandbox")
 	flag.BoolVar(&cfg.noInspect, "no-inspect", false, "don't terminate TLS in the sandbox's proxy: tunnel every HTTPS connection unread (by default the proxy decrypts the allow-listed hosts with a CA made for the session, and logs each request); requires -sandbox")
+	flag.BoolVar(&cfg.noKeychain, "no-keychain", false, "don't read the Mistral API key Vibe's browser sign-in stored in the macOS Keychain for -sandbox -harness vibe sessions (set RNES_MISTRAL_API_KEY to use a key anyway); requires -sandbox")
 	flag.BoolVar(&cfg.web, "web", false, "open opencode's web UI for the session in your browser at startup (requires -harness opencode); the TUI keeps running and both share one live session")
 	flag.BoolVar(&cfg.noWeb, "no-web", false, "don't serve the session's web UI at all (with -sandbox it is exposed on a loopback port by default; on the host opencode's server always serves it, so this only saves the sandbox forward)")
-	flag.Var(&cfg.skills, "skill", "attach a host skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then the active harness's global skills folder, ~/.gemini/config/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
+	flag.Var(&cfg.skills, "skill", "attach a host skill to the sandbox, read-only: a skill name (looked up in each -skills-dir, then the active harness's global skills folder, ~/.gemini/config/skills, ~/.vibe/skills, ~/.agents/skills and ~/.claude/skills), a path to one skill directory, or \"all\"; repeatable; requires -sandbox")
 	flag.Var(&cfg.skillsDirs, "skills-dir", "a host folder whose subdirectories are skills, searched before the default ones for -skill names and \"all\"; attaches nothing on its own; repeatable; requires -sandbox")
 	flag.Usage = func() { usage(os.Stderr) }
 	flag.Parse()
@@ -582,7 +644,8 @@ func parseFlags() (cliConfig, error) {
 	cfg.dropSkillsForUpdate()
 	cfg.githubToken = cfg.sessionCredential(harness.EnvGitHubToken, githubTokenFromEnv())
 	cfg.openrouterKey = cfg.sessionCredential(harness.EnvOpenRouterAPIKey, openRouterKeyFromEnv())
-	cfg.mistralKey = cfg.sessionCredential(harness.EnvMistralAPIKey, mistralKeyFromEnv())
+	envMistralKey := cfg.sessionCredential(harness.EnvMistralAPIKey, mistralKeyFromEnv())
+	cfg.mistralKey, cfg.mistralKeyFromKeychain = cfg.mistralKeyForSession(envMistralKey, vibeKeychainKey)
 	return cfg, cfg.validate()
 }
 
@@ -648,7 +711,11 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "rnes: OpenRouter key: the sandbox proxy injects it at openrouter.ai; the sandbox only holds a placeholder (use a dedicated key with a low credit limit). Prompts leave your machine when you pick an openrouter model.")
 	}
 	if cfg.mistralKey != "" {
-		fmt.Fprintln(os.Stderr, "rnes: Mistral key: the sandbox proxy injects it at api.mistral.ai; the sandbox only holds a placeholder. Prompts leave your machine when you pick a mistral model.")
+		if cfg.mistralKeyFromKeychain {
+			fmt.Fprintln(os.Stderr, "rnes: Mistral key: read from the macOS Keychain (Vibe's browser sign-in; -no-keychain turns this off); the sandbox proxy injects it at api.mistral.ai; the sandbox only holds a placeholder. Prompts leave your machine when you pick a mistral model.")
+		} else {
+			fmt.Fprintln(os.Stderr, "rnes: Mistral key: the sandbox proxy injects it at api.mistral.ai; the sandbox only holds a placeholder. Prompts leave your machine when you pick a mistral model.")
+		}
 	}
 	if names := activeProviders(cfg); len(names) > 0 {
 		fmt.Fprintln(os.Stderr, "rnes: credentials:", strings.Join(names, ", "))

@@ -131,6 +131,8 @@ func TestPrepareAllHarnessesBuildsEveryHarnessBaseAndProxyOnce(t *testing.T) {
 		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-agy:",
 		"build --no-cache -t rnes-sandbox-base-opencode:",
 		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-opencode:",
+		"build --no-cache -t rnes-sandbox-base-vibe:",
+		"build --no-cache --build-arg RNES_BASE=rnes-sandbox-base-vibe:",
 		"build --no-cache -t rnes-sandbox-proxy:",
 	}
 	if len(got) != len(wantPrefixes) {

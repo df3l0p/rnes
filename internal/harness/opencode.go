@@ -42,6 +42,8 @@ func opencodeProfile(hostConfig string) sandboxProfile {
 		needsModelServer:      true,
 		usesGeneratedConfig:   true,
 		hostConfig:            hostConfig,
+		renderConfig:          renderOpencodeConfig,
+		setModel:              setOpencodeModel,
 		openRouterEnv:         "OPENROUTER_API_KEY",
 		mistralEnv:            "MISTRAL_API_KEY",
 		skillsConfigHome:      containerConfigHome,
@@ -53,6 +55,64 @@ func opencodeProfile(hostConfig string) sandboxProfile {
 			return append([]string{"."}, extraArgs...)
 		},
 	}
+}
+
+// renderOpencodeConfig writes a copy of the host opencode config, with the
+// provider pointed at baseURL as seen from inside a container, and every
+// provider's literal apiKey stripped.
+func renderOpencodeConfig(s *Sandbox, hostConfig, providerKey, baseURL string, modelIDs []string) ([]byte, error) {
+	out, err := opencodeconfig.Render(hostConfig, providerKey, opencodeProvider(baseURL, modelIDs))
+	if err != nil {
+		return nil, err
+	}
+	// A literal apiKey in any provider block must never reach the container:
+	// for the proxied providers (openrouter, mistral) it would override the
+	// placeholder and skip the proxy; for any other provider it would still
+	// leak the credential into the sandbox, usable whenever a project policy
+	// allow-lists its host. Strip them all, whatever the session's keys are.
+	// This covers only the copy of the global host config: project-level
+	// opencode configs inside the mounted workspace are the project's own
+	// files, readable by the agent like any other workspace file, and are
+	// loaded as-is.
+	out, dropped, err := opencodeconfig.DropProviderAPIKeys(out)
+	if err != nil {
+		return nil, err
+	}
+	if len(dropped) > 0 {
+		// Only the proxied providers get their key back (the proxy injects
+		// it); every other dropped provider just loses access, so the
+		// warning must say which is which instead of claiming the proxy
+		// covers them all.
+		var proxied, lost []string
+		injected := map[string]string{}
+		for _, id := range dropped {
+			if env, ok := s.injectedFrom(cloudProviderHosts[id]); ok {
+				proxied = append(proxied, id)
+				injected[id] = env
+				continue
+			}
+			lost = append(lost, id)
+		}
+		fmt.Fprintf(os.Stderr, "rnes: warning: removed the apiKey of %s from the sandbox's copy of your opencode config so it never reaches the container", strings.Join(dropped, ", "))
+		if len(proxied) > 0 {
+			var from []string
+			for _, id := range proxied {
+				from = append(from, id+" (from "+injected[id]+")")
+			}
+			fmt.Fprintf(os.Stderr, "; the proxy injects its key for %s", strings.Join(from, ", "))
+		}
+		if len(lost) > 0 {
+			fmt.Fprintf(os.Stderr, "; %s models don't work in the sandbox without a key of their own", strings.Join(lost, ", "))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	return out, nil
+}
+
+// setOpencodeModel sets the generated config's default model, which opencode
+// names as "provider/model".
+func setOpencodeModel(raw []byte, providerKey, modelID string) ([]byte, error) {
+	return opencodeconfig.SetModel(raw, providerKey+"/"+modelID)
 }
 
 // opencodeProvider builds the provider block that points opencode at a

@@ -14,8 +14,8 @@ var validName = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*$`)
 
 func TestImageNamesAreValidDockerRepositoryNames(t *testing.T) {
 	bases := BaseNames()
-	if !reflect.DeepEqual(bases, []string{"base-agy", "base-opencode"}) {
-		t.Fatalf("BaseNames() = %v, want [base-agy base-opencode]", bases)
+	if !reflect.DeepEqual(bases, []string{"base-agy", "base-opencode", "base-vibe"}) {
+		t.Fatalf("BaseNames() = %v, want [base-agy base-opencode base-vibe]", bases)
 	}
 	for _, name := range append(bases, Names()...) {
 		if !validName.MatchString(name) {
@@ -98,6 +98,22 @@ func TestReadBase(t *testing.T) {
 		t.Error("agy base must be a standalone debian:bookworm-slim image")
 	}
 
+	vibeRaw, err := ReadBase("vibe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(vibeRaw), "FROM debian:bookworm-slim") {
+		t.Error("vibe base must be a standalone debian:bookworm-slim image")
+	}
+	// Vibe is a Python package needing 3.12+, which bookworm doesn't ship, so
+	// the base installs it with uv's own interpreter. Both must live outside
+	// /root, which the sandbox user can't read.
+	for _, want := range []string{"uv tool install", "UV_TOOL_DIR=/opt/", "UV_PYTHON_INSTALL_DIR=/opt/"} {
+		if !strings.Contains(string(vibeRaw), want) {
+			t.Errorf("vibe base must contain %q", want)
+		}
+	}
+
 	for _, bad := range []string{"", "nope", "../default"} {
 		if _, err := ReadBase(bad); err == nil {
 			t.Errorf("ReadBase(%q) = nil error, want one", bad)
@@ -114,6 +130,7 @@ func TestBundledImagesFollowTheContract(t *testing.T) {
 	wantEntrypoints := map[string]string{
 		"base-opencode": `ENTRYPOINT ["opencode"]`,
 		"base-agy":      `ENTRYPOINT ["agy"]`,
+		"base-vibe":     `ENTRYPOINT ["vibe"]`,
 	}
 	all := append(BaseNames(), Names()...)
 	for _, name := range all {

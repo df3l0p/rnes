@@ -14,12 +14,12 @@ import (
 )
 
 func TestValidateRejectsSandboxOnlyFlagsWithoutSandbox(t *testing.T) {
-	for _, cfg := range []cliConfig{{image: "x"}, {build: true}, {allowPublic: true}, {allowPrivate: true}, {noInspect: true}} {
+	for _, cfg := range []cliConfig{{image: "x"}, {build: true}, {allowPublic: true}, {allowPrivate: true}, {noInspect: true}, {noKeychain: true}} {
 		if err := cfg.validate(); err == nil {
 			t.Errorf("validate(%+v) = nil, want an error", cfg)
 		}
 	}
-	for _, cfg := range []cliConfig{{}, {sandbox: true}, {sandboxUpdate: true}, {sandbox: true, image: "x", build: true, allowPublic: true, allowPrivate: true, noInspect: true}} {
+	for _, cfg := range []cliConfig{{}, {sandbox: true}, {sandboxUpdate: true}, {sandbox: true, image: "x", build: true, allowPublic: true, allowPrivate: true, noInspect: true, noKeychain: true}} {
 		if err := cfg.validate(); err != nil {
 			t.Errorf("validate(%+v) = %v, want nil", cfg, err)
 		}
@@ -195,7 +195,7 @@ func TestOpenRouterKeyFromEnvReadsAndUnsets(t *testing.T) {
 }
 
 func TestValidateRejectsAnOpenRouterKeyWithNoInspect(t *testing.T) {
-	err := cliConfig{sandbox: true, noInspect: true, openrouterKey: "sk-or-x"}.validate()
+	err := cliConfig{sandbox: true, harness: "opencode", noInspect: true, openrouterKey: "sk-or-x"}.validate()
 	if err == nil || !strings.Contains(err.Error(), "RNES_OPENROUTER_API_KEY") {
 		t.Errorf("err = %v", err)
 	}
@@ -208,6 +208,50 @@ func TestMistralKeyFromEnvReadsAndUnsets(t *testing.T) {
 	}
 	if v, ok := os.LookupEnv("RNES_MISTRAL_API_KEY"); ok {
 		t.Errorf("RNES_MISTRAL_API_KEY is still set (%q): child processes would inherit it", v)
+	}
+}
+
+func TestMistralKeyForSessionPrefersTheEnvironment(t *testing.T) {
+	read := func() string {
+		t.Error("the keychain was read even though RNES_MISTRAL_API_KEY was set")
+		return "kc-x"
+	}
+	got, fromKeychain := (cliConfig{sandbox: true, harness: "vibe"}).mistralKeyForSession("mis-x", read)
+	if got != "mis-x" || fromKeychain {
+		t.Errorf("mistralKeyForSession = (%q, %v), want (\"mis-x\", false)", got, fromKeychain)
+	}
+}
+
+func TestMistralKeyForSessionReadsTheKeychainOnlyForASandboxedVibeSession(t *testing.T) {
+	read := func() string { return "kc-x" }
+	for _, tc := range []struct {
+		name string
+		cfg  cliConfig
+		want string
+	}{
+		{"sandboxed vibe", cliConfig{sandbox: true, harness: "vibe"}, "kc-x"},
+		{"host vibe", cliConfig{harness: "vibe"}, ""},
+		{"opencode", cliConfig{sandbox: true, harness: "opencode"}, ""},
+		{"agy", cliConfig{sandbox: true, harness: "agy"}, ""},
+		{"-no-keychain", cliConfig{sandbox: true, harness: "vibe", noKeychain: true}, ""},
+		{"-no-inspect", cliConfig{sandbox: true, harness: "vibe", noInspect: true}, ""},
+		{"-generate-policy", cliConfig{sandbox: true, harness: "vibe", generatePolicy: true}, ""},
+		{"-sandbox-update", cliConfig{sandbox: true, harness: "vibe", sandboxUpdate: true}, ""},
+	} {
+		got, fromKeychain := tc.cfg.mistralKeyForSession("", read)
+		if got != tc.want {
+			t.Errorf("%s: mistralKeyForSession = %q, want %q", tc.name, got, tc.want)
+		}
+		if fromKeychain != (tc.want != "") {
+			t.Errorf("%s: fromKeychain = %v, want %v", tc.name, fromKeychain, tc.want != "")
+		}
+	}
+}
+
+func TestMistralKeyForSessionIgnoresAnUnsignedInKeychain(t *testing.T) {
+	got, fromKeychain := (cliConfig{sandbox: true, harness: "vibe"}).mistralKeyForSession("", func() string { return "" })
+	if got != "" || fromKeychain {
+		t.Errorf("mistralKeyForSession = (%q, %v), want (\"\", false)", got, fromKeychain)
 	}
 }
 
@@ -226,20 +270,23 @@ func TestValidateRejectsAnUnusableMistralKey(t *testing.T) {
 }
 
 func TestValidateRejectsAnUnusableOpenRouterKey(t *testing.T) {
-	err := cliConfig{sandbox: true, openrouterKey: "sk-or-x\n"}.validate()
+	err := cliConfig{sandbox: true, harness: "opencode", openrouterKey: "sk-or-x\n"}.validate()
 	if err == nil || !strings.Contains(err.Error(), "RNES_OPENROUTER_API_KEY") || strings.Contains(err.Error(), "sk-or-x") {
 		t.Errorf("err = %v, want one naming RNES_OPENROUTER_API_KEY and not echoing it", err)
 	}
 }
 
-func TestValidateIgnoresTheOpenRouterKeyForACloudHarness(t *testing.T) {
-	// agy never uses the OpenRouter provider, so even an unusable key or one
+func TestValidateIgnoresTheOpenRouterKeyForAHarnessWithoutOne(t *testing.T) {
+	// agy and vibe have no OpenRouter provider, so even an unusable key or one
 	// combined with -no-inspect must not block the session (it is dropped with
 	// a note at startup).
 	for _, cfg := range []cliConfig{
 		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x"},
 		{sandbox: true, harness: "agy", noInspect: true, openrouterKey: "sk-or-x"},
 		{sandbox: true, harness: "agy", openrouterKey: "sk-or-x\n"},
+		{sandbox: true, harness: "vibe", openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "vibe", noInspect: true, openrouterKey: "sk-or-x"},
+		{sandbox: true, harness: "vibe", openrouterKey: "sk-or-x\n"},
 	} {
 		if err := cfg.validate(); err != nil {
 			t.Errorf("validate(%+v) = %v, want nil", cfg, err)
@@ -281,7 +328,7 @@ func TestActiveProvidersListsOnlyTheSetOnes(t *testing.T) {
 func TestUsageDocumentsTheCloudKeys(t *testing.T) {
 	var buf bytes.Buffer
 	usage(&buf)
-	for _, want := range []string{"RNES_OPENROUTER_API_KEY", "RNES_MISTRAL_API_KEY", "credit limit", "-sandbox"} {
+	for _, want := range []string{"RNES_OPENROUTER_API_KEY", "RNES_MISTRAL_API_KEY", "credit limit", "-sandbox", "-no-keychain", "Keychain"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("usage is missing %q:\n%s", want, buf.String())
 		}
