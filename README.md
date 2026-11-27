@@ -82,6 +82,7 @@ the session's generated config so it starts on it.
 | `-allow-public` | off                                          | Let the sandbox reach any public host, not just the allow-list (requires `-sandbox`; see below) |
 | `-allow-private` | off                                         | Let the sandbox reach private addresses (RFC 1918 / IPv6 ULA) outside the allow-list; listed hosts keep their public-only check unless marked `private: true` in `policy.yaml` (requires `-sandbox`; see below) |
 | `-no-inspect` | off                                             | Don't decrypt the sandbox's HTTPS in the proxy; tunnel it unread (requires `-sandbox`; see below) |
+| `-no-keychain` | off                                            | Don't read the Mistral API key Vibe's browser sign-in stored in the macOS Keychain for `-sandbox -harness vibe` sessions (requires `-sandbox`; see *Mistral models* below) |
 | `-web`      | off                                               | Open the session's web UI in your browser at startup; the TUI keeps running and both share one live session |
 | `-no-web`   | off                                               | Don't serve the session's web UI at all (with `-sandbox` it is exposed on a loopback port by default) |
 | `-skill`    | none                                              | Attach a host skill to the sandbox, read-only: a name, a path to a skill directory, or `all`. Repeatable (requires `-sandbox`; see *Skills* below) |
@@ -205,7 +206,7 @@ rnes -no-web    # don't expose the web UI (sandbox: no loopback forward)
 | ------------------------- | ----------- |
 | `RNES_GITHUB_TOKEN`       | GitHub token the sandbox's proxy injects for `git` and `gh` (requires `-sandbox`; see *GitHub credentials* below). Prefer a fine-grained token; to reuse your `gh` login, `export RNES_GITHUB_TOKEN=$(gh auth token)`. |
 | `RNES_OPENROUTER_API_KEY` | OpenRouter API key the sandbox's proxy injects at `openrouter.ai` (requires `-sandbox`; ignored with `-harness agy` or `-harness vibe`, which have no OpenRouter provider; see *OpenRouter models* below). Set with `export RNES_OPENROUTER_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.openrouter.key')`. |
-| `RNES_MISTRAL_API_KEY`    | Mistral API key the sandbox's proxy injects at `api.mistral.ai` (requires `-sandbox`; ignored with `-harness agy`; see *Mistral models* below). To reuse the key opencode stores, set with `export RNES_MISTRAL_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.mistral.key')`; a Vibe subscription key also works (on macOS, `export RNES_MISTRAL_API_KEY=$(security find-generic-password -s ai.mistral.vibe -a MISTRAL_API_KEY -w)` after browser sign-in; on Linux, copy the key from `https://chat.mistral.ai/code/extensions` (Advanced section)). |
+| `RNES_MISTRAL_API_KEY`    | Mistral API key the sandbox's proxy injects at `api.mistral.ai` (requires `-sandbox`; ignored with `-harness agy`; see *Mistral models* below). To reuse the key opencode stores, set with `export RNES_MISTRAL_API_KEY=$(cat ~/.local/share/opencode/auth.json \| jq -c -r '.mistral.key')`; a Vibe subscription key also works (on macOS, `export RNES_MISTRAL_API_KEY=$(security find-generic-password -s ai.mistral.vibe -a MISTRAL_API_KEY -w)` after browser sign-in, or let `-sandbox -harness vibe` read it for you; on Linux, copy the key from `https://chat.mistral.ai/code/extensions` (Advanced section)). |
 
 Those three variables are just the built-in cases: any `-sandbox` session can
 inject another host environment variable through `.rnes/policy.yaml` with
@@ -522,10 +523,14 @@ ownership".
   A Vibe subscription key also works: on macOS after browser sign-in it sits
   in the keychain (service `ai.mistral.vibe`, account `MISTRAL_API_KEY`); on
   Linux, copy the key from
-  `https://chat.mistral.ai/code/extensions` (Advanced section). The same
-  scope, privacy and `-no-inspect` caveats as OpenRouter apply; a subscription
-  key is shared with your Vibe usage, so prefer a dedicated
-  console.mistral.ai key for agents.
+  `https://chat.mistral.ai/code/extensions` (Advanced section). With
+  `-sandbox -harness vibe`, rnes reads that keychain item itself when
+  `RNES_MISTRAL_API_KEY` is unset, so a signed-in user needs no export: it
+  prints where the key came from, and `-no-keychain` turns the lookup off.
+  Only Vibe gets this — opencode has its own sign-in and its own key, and agy
+  has no Mistral provider. The same scope, privacy and `-no-inspect` caveats
+  as OpenRouter apply; a subscription key is shared with your Vibe usage, so
+  prefer a dedicated console.mistral.ai key for agents.
 - Session data inside the container is discarded on exit (`--rm`), except a
   harness's own persisted auth volume (`agy`; see *Antigravity* below).
 
@@ -764,14 +769,18 @@ ends:
   own `.vibe/config.toml` and `.vibe/hooks.toml` then load, inside the sandbox,
   and its hooks run without an approval prompt: only open a vibe sandbox
   session in a repository whose hooks you trust.
-- With `RNES_MISTRAL_API_KEY` set, the proxy injects the key at
-  `api.mistral.ai` and the container only ever holds a placeholder, which
-  Vibe's built-in Mistral provider reads from `MISTRAL_API_KEY`. Mistral models
-  are then selectable with `/model`, and prompts leave your machine when you
-  pick one.
-- Signing in to Mistral from inside the sandbox is not supported: the
-  sign-in flow needs `console.mistral.ai` and a loopback callback the container
-  can't reach. Use `RNES_MISTRAL_API_KEY` instead.
+- With `RNES_MISTRAL_API_KEY` set — or, on macOS, read from the Keychain
+  automatically when Vibe is signed in (see *Mistral models*) — the proxy
+  injects the key at `api.mistral.ai` and the container only ever holds a
+  placeholder, which Vibe's built-in Mistral provider reads from
+  `MISTRAL_API_KEY`. Mistral models are then selectable with `/model`, and
+  prompts leave your machine when you pick one.
+- Signing in to Mistral from inside the sandbox is not supported. Vibe's
+  browser sign-in is poll-based, not a paste-the-code flow: it opens
+  `console.mistral.ai` in a browser, then polls that host until the sign-in
+  completes. The container has no browser to open and `console.mistral.ai` is
+  not in the allow-list, so the flow stops at its first step. Use
+  `RNES_MISTRAL_API_KEY` (or the Keychain pickup) instead.
 - With a Mistral key present, Vibe also calls its console host
   (`chat.mistral.ai`) for account and usage data. The proxy blocks it, so the
   session ends with a `proxy blocked: chat.mistral.ai:443` line; nothing in the
